@@ -135,10 +135,9 @@ folder card through. Any of them can be stranded by a kill; none is save data.
 
 
 _PENDING_WRITE = re.compile(r"\uff04.+\.[0-9A-Za-z]+\.tmp")
-"""RPCS3's `fs::pending_file` temp (Utilities/File.cpp), matched whole.
+"""RPCS3's `fs::pending_file` temp, `＄<name>.<id>.tmp`, matched whole.
 
-`＄<name>.<id>.tmp` beside the file it becomes once renamed into place; a
-kill mid-write (a savestate, say) strands it, and it is never save data.
+A kill mid-write strands it beside the file it would have been renamed to.
 """
 
 

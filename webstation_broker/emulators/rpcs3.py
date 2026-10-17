@@ -12,13 +12,13 @@ EBOOT.BIN. .rap/.edat licenses are plain files copied into
 
 Save states: unlike PCSX2, RPCS3 has no live save/load. Pressing the
 save-state hotkey stops the game to write the state, then reboots it from
-that state, and loading one means booting RPCS3 pointed straight at the
+that state; loading one means booting RPCS3 pointed straight at the
 .SAVESTAT file (recognised by its extension and magic bytes) instead of a
 normal boot target, functionally the same as booting a ROM. So the broker
 follows DuckStation's model rather than PCSX2's: no live supports_states, a
 resume loads by choosing what to boot before the process starts, and a save
-happens by triggering the hotkey at exit, waiting for the state file to
-settle, then stopping the rebooted process. States are per-title, at
+happens by triggering the hotkey at exit, waiting for the state to settle
+and the reboot to load it, then stopping the process. States are per-title, at
 DATA_DIR/savestates/<title_id>/, which is a sibling of dev_hdd0 rather than
 something under it; a symlink into dev_hdd0/savestates is what lets the
 existing save archive (keyed to dev_hdd0-relative paths) carry it without
@@ -169,12 +169,9 @@ _XDOTOOL = os.environ.get("XDOTOOL_BIN", "xdotool")
 # once a game is running - no title filtering needed the way PPSSPP's shared
 # menu/game class needs.
 _WINDOW_CLASS = "rpcs3"
-# Default binding for gw_savestate (rpcs3qt/shortcut_settings.cpp), the one
-# shortcut that writes a state (Emu.Kill(false, true) in gs_frame.cpp). The
-# Alt+Ctrl+1..4 shortcuts next to it are gw_savestate_1..4, which since
-# RPCS3's multi-slot savestates boot the game from that slot instead of
-# saving one. Configurable because it's a GUI-rebindable shortcut, unlike the
-# rest of this module's constants.
+# gw_savestate's default binding (rpcs3qt/shortcut_settings.cpp), the only
+# shortcut that writes a state; Alt+Ctrl+1..4 boot the game from a slot.
+# Configurable because the shortcut is GUI-rebindable.
 _SAVE_STATE_KEY = os.environ.get("RPCS3_SAVE_STATE_KEY", "ctrl+s")
 
 
@@ -1190,10 +1187,8 @@ def _holds_open(pid: Optional[int], path: Path) -> bool:
 def _wait_for_reboot_load(pid: Optional[int], path: Path, deadline: float) -> None:
     """Wait for the hotkey's reboot to finish reading the state it just wrote.
 
-    The state is complete by now; this only keeps the stop that follows from
-    killing RPCS3 mid-load, where a reboot with Save Disc Game Data on is
-    rewriting the title's game data folder. RPCS3 drops its read of the state
-    once the game is running again (Emulator::Run, rpcs3/Emu/System.cpp).
+    Stopping mid-load can cut short the reboot's rewrite of the game data
+    folder. RPCS3 drops its read once the game runs again (Emulator::Run).
 
     Args:
         pid: The running rpcs3 process, or None to skip the wait.
@@ -1211,11 +1206,8 @@ def _wait_for_reboot_load(pid: Optional[int], path: Path, deadline: float) -> No
 def _wait_for_state_write(serial: Optional[str], before: dict, deadline: float) -> Optional[Path]:
     """Poll until the title's new savestate appears and settles, or the deadline passes.
 
-    RPCS3 writes a state through `fs::pending_file` (Utilities/File.cpp): a
-    `＄<name>.<id>.tmp` temp that `_state_snapshot` never matches, renamed to
-    the final name once complete. So a file under the final name is already
-    whole; it counts once it is non-empty and its size has held steady for
-    STABLE_SECS, a guard against a host that writes it some other way.
+    RPCS3 writes through `fs::pending_file`, a `＄<name>.<id>.tmp` temp renamed
+    into place once complete, so the final name only ever appears whole.
 
     Args:
         serial: Title id scoping the state dir to watch.
@@ -1245,11 +1237,7 @@ def _wait_for_state_write(serial: Optional[str], before: dict, deadline: float) 
             target, last_size, stable_since = p, size, time.monotonic()
         elif size != last_size:
             last_size, stable_since = size, time.monotonic()
-        elif (
-            stable_since is not None
-            and time.monotonic() - stable_since >= STABLE_SECS
-            and last_size
-        ):
+        elif stable_since is not None and time.monotonic() - stable_since >= STABLE_SECS and last_size:
             log.info("save state write complete: %s (%d bytes)", target.name, last_size)
             return target
         time.sleep(POLL_SECS)
