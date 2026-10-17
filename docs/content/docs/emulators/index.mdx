@@ -403,11 +403,11 @@ lets a game be saved or loaded while it keeps running. What it has instead
 is an exit-time save. Sending RPCS3 its own save-state hotkey
 ([`RPCS3_SAVE_STATE_KEY`](/docs/configuration/emulators#rpcs3), `ctrl+s`
 by default) stops the game to write the state and then reboots it from that
-state, so the game can't keep running past a save. The broker sends that
-hotkey on exit, waits for the state file to finish writing, then stops
-RPCS3. A resume works by pointing the next launch straight at the
-newest saved state instead of the game itself: RPCS3 tells a save state
-apart from a normal boot target by its file contents, not its extension, so
+state, so a save always interrupts play. The broker sends that
+hotkey on exit, waits for the state file to finish writing and for the
+reboot to finish loading it, then stops RPCS3. A resume works by pointing the next launch straight at the
+newest saved state instead of the game itself: RPCS3 recognises a save state
+passed as its boot target by the file's extension and header, so
 booting into one works the same way booting a ROM does. States are kept one
 per title, so `resume_slot` always finds the right one. The state an exit
 confirms is served through the state-file GET until the next activate, the
