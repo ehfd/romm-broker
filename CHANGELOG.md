@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.15.1](https://github.com/romm-streaming/romm-broker/compare/v0.15.0...v0.15.1) (2026-10-17)
+
+
+### Bug Fixes
+
+* **rpcs3:** read a bare .iso's title id from its PARAM.SFO ([ae77ea0](https://github.com/romm-streaming/romm-broker/commit/ae77ea034bae875e98bbfed32fa3b2320cfc8c2f))
+* **rpcs3:** resolve an unknown title id over PINE at exit ([e506450](https://github.com/romm-streaming/romm-broker/commit/e506450db3f50f0e22a14ed95192ffd77113bbff))
+* **rpcs3:** resolve an unknown title id over PINE at exit ([8e49fd2](https://github.com/romm-streaming/romm-broker/commit/8e49fd2d62c750df1787f804c3ac723d6aa29a86))
+* **rpcs3:** send the savestate shortcut on exit, not the slot-1 boot key ([264b8da](https://github.com/romm-streaming/romm-broker/commit/264b8da09591a911f3e21f75dfa9497249f5735d))
+* **rpcs3:** send the savestate shortcut on exit, not the slot-1 boot key ([68263aa](https://github.com/romm-streaming/romm-broker/commit/68263aa6c3032b930a7860a5913c2174bfc24601))
+* **rpcs3:** wait out the hotkey's reboot and clear interrupted state writes (pr-ready step 2, code-review) ([43fb450](https://github.com/romm-streaming/romm-broker/commit/43fb450d2c3e10d384a43938ba8946d1162bbca5))
+
+
+### Documentation
+
+* **rpcs3:** trim the save-state comments and reflow the exit docs (pr-ready step 4, review-polish) ([f3cd2ae](https://github.com/romm-streaming/romm-broker/commit/f3cd2ae80d89916cb817cba5b722a1c6a4fa4157))
+
 ## [0.15.0](https://github.com/romm-streaming/romm-broker/compare/v0.14.2...v0.15.0) (2026-10-10)
 
 
