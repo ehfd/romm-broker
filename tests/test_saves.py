@@ -186,6 +186,7 @@ def test_a_dump_with_a_stored_member_restores_byte_for_byte(tmp_path: Path) -> N
         pytest.param(".atime-probe.1234.89abcdef", id="atime-probe-tagged"),
         pytest.param(".Mcd001.ps2.new/_pcsx2_superblock", id="memcard-staging"),
         pytest.param(".Mcd001.ps2.old/_pcsx2_superblock", id="memcard-backup"),
+        pytest.param("\uff04BLUS30443_1.SAVESTAT.zst.3kQ9xZ.tmp", id="rpcs3-pending-write"),
     ],
 )
 def test_build_skips_broker_scratch_a_crash_left_behind(tmp_path: Path, scratch: str) -> None:
@@ -1103,6 +1104,7 @@ def test_plan_v1_refuses_a_member_that_is_another_members_directory(
         pytest.param("GC/.a.raw.0123456789abcdef.tmp", id="staging"),
         pytest.param("GC/.atime-probe.1234", id="atime-probe"),
         pytest.param("GC/.Mcd001.ps2.old/_pcsx2_superblock", id="memcard-backup"),
+        pytest.param("GC/\uff04a.SAVESTAT.zst.3kQ9xZ.tmp", id="rpcs3-pending-write"),
         pytest.param(f"GC/{saves.MANIFEST_NAME}", id="manifest"),
     ],
 )

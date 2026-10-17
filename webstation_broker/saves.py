@@ -134,16 +134,26 @@ folder card through. Any of them can be stranded by a kill; none is save data.
 """
 
 
+_PENDING_WRITE = re.compile(r"\uff04.+\.[0-9A-Za-z]+\.tmp")
+"""RPCS3's `fs::pending_file` temp, `＄<name>.<id>.tmp`, matched whole.
+
+A kill mid-write strands it beside the file it would have been renamed to.
+"""
+
+
 def _is_broker_scratch(parts: tuple[str, ...]) -> bool:
-    """Whether a path, as its components, is the broker's own and never save data.
+    """Whether a path, as its components, is scratch and never save data.
 
     Args:
         parts: The path's components, relative to a save subtree or the root.
 
     Returns:
-        True for broker scratch anywhere in the path, or a `MANIFEST_NAME` leaf.
+        True for broker scratch or an emulator's unfinished write anywhere in
+        the path, or a `MANIFEST_NAME` leaf.
     """
-    return parts[-1:] == (MANIFEST_NAME,) or any(_BROKER_SCRATCH.fullmatch(part) for part in parts)
+    return parts[-1:] == (MANIFEST_NAME,) or any(
+        _BROKER_SCRATCH.fullmatch(part) or _PENDING_WRITE.fullmatch(part) for part in parts
+    )
 
 
 def _iter_save_files(root: Path, subtrees: tuple[str, ...]) -> list[Path]:
