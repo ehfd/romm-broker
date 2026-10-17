@@ -405,8 +405,12 @@ is an exit-time save. Sending RPCS3 its own save-state hotkey
 by default) stops the game to write the state and then reboots it from that
 state, so a save always interrupts play. The broker sends that hotkey on
 exit, waits for the state file to finish writing and for the reboot to load
-it, then stops RPCS3. A resume works by pointing the next launch straight at
-the newest saved state instead of the game itself: RPCS3 recognises a save state
+it, then stops RPCS3. The state is filed under the game's title id, which a
+bare `.iso` gives up only once it runs: the broker asks RPCS3 for it at boot,
+and again at exit when a first boot's PPU compile outlasted
+[`RPCS3_BOOT_WAIT`](/docs/configuration/emulators#rpcs3). A resume works by
+pointing the next launch straight at the newest saved state instead of the
+game itself: RPCS3 recognises a save state
 passed as its boot target by the file's extension and header, so
 booting into one works the same way booting a ROM does. States are kept one
 per title, so `resume_slot` always finds the right one. The state an exit

@@ -2030,11 +2030,8 @@ class Rpcs3(Emulator):
                         )
                         return
                     if title:
-                        self._session_serial = title
+                        self._adopt_title_id(title)
                         log.info("boot watchdog: resolved title id %s via PINE", title)
-                        if self._leftover_snapshot is not None:
-                            _clear_leftover_states(title, self._leftover_snapshot)
-                            self._leftover_snapshot = None
                 else:
                     log.debug(
                         "boot watchdog: %s confirmed running via PINE", self._session_serial
@@ -2052,6 +2049,13 @@ class Rpcs3(Emulator):
             )
         else:
             log.warning("boot watchdog: rpcs3 exited before ever reporting running")
+
+    def _adopt_title_id(self, title: str) -> None:
+        """Scope the session to `title` and finish the leftover-state clear it deferred."""
+        self._session_serial = title
+        if self._leftover_snapshot is not None:
+            _clear_leftover_states(title, self._leftover_snapshot)
+            self._leftover_snapshot = None
 
     def _save_exit_state(self) -> Optional[dict]:
         """Send the save-state hotkey and wait for its state and the reboot after it.
@@ -2094,6 +2098,13 @@ class Rpcs3(Emulator):
             A dict with `state_saved`, `state_slot`, and `state_file` (path,
             size, and mtime of the new state file, or None if none was saved).
         """
+        if not self._session_serial and self.alive():
+            # A first boot's PPU compile can outlast the boot watchdog, which
+            # then never names an .iso's title; by exit the game is running.
+            title = _pine_title_id()
+            if title:
+                self._adopt_title_id(title)
+                log.info("save-and-exit: resolved title id %s via PINE", title)
         state_file = self._save_exit_state() if slot is not None and self.alive() else None
 
         # The dump ships files newer than the session baseline. A save is a

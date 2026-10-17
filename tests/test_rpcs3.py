@@ -1250,12 +1250,87 @@ def test_exit_with_a_slot_but_no_known_serial_saves_nothing(
     """Exit with a slot but no known serial saves nothing."""
     emu = rpcs3.Rpcs3()
     monkeypatch.setattr(rpcs3.Rpcs3, "alive", lambda self: True)
+    monkeypatch.setattr(rpcs3, "_pine_title_id", lambda: None)
     emu._session_serial = None
     emu._send_key = lambda key: pytest.fail("hotkey sent with no known title id")
 
     report = emu.save_and_exit(1)
 
     assert report == {"state_saved": False, "state_slot": 1, "state_file": None}
+
+
+def test_exit_resolves_a_title_the_boot_watchdog_never_learned(
+    rpcs3_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An .iso whose first-boot compile outlasted the watchdog still saves a state at exit."""
+    emu = rpcs3.Rpcs3()
+    monkeypatch.setattr(rpcs3.Rpcs3, "alive", lambda self: True)
+    monkeypatch.setattr(rpcs3, "_pine_title_id", lambda: "BLUS30443")
+    emu._session_serial = None
+    written = rpcs3_dirs["sstate_root"] / "BLUS30443" / "BLUS30443_1.SAVESTAT"
+
+    def fake_send_key(key: str) -> bool:
+        _touch(written)
+        return True
+
+    emu._send_key = fake_send_key
+
+    report = emu.save_and_exit(1)
+
+    assert emu._session_serial == "BLUS30443"
+    assert report["state_saved"] is True
+    assert report["state_file"]["path"] == str(written)
+
+
+def test_exit_restamps_the_save_dirs_of_a_title_resolved_at_exit(
+    rpcs3_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The resolved title scopes the restamp too, so its untouched save files still ship."""
+    emu = rpcs3.Rpcs3()
+    monkeypatch.setattr(rpcs3.Rpcs3, "alive", lambda self: True)
+    monkeypatch.setattr(rpcs3, "_pine_title_id", lambda: "BLUS30443")
+    emu._session_serial = None
+    emu._session_start = time.time()
+    old = _touch(
+        rpcs3_dirs["user_home"] / "savedata" / "BLUS30443-SAVE00" / "SYS-DATA",
+        mtime=emu._session_start - 3600,
+    )
+
+    emu.save_and_exit(None)
+
+    assert old.stat().st_mtime >= emu._session_start
+
+
+def test_exit_finishes_the_deferred_leftover_clear_for_a_title_resolved_at_exit(
+    rpcs3_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale state the activate-time clear could not scope is dropped once PINE names the title."""
+    emu = rpcs3.Rpcs3()
+    monkeypatch.setattr(rpcs3.Rpcs3, "alive", lambda self: True)
+    monkeypatch.setattr(rpcs3, "_pine_title_id", lambda: "BLUS30443")
+    stale = _touch(rpcs3_dirs["sstate_root"] / "BLUS30443" / "BLUS30443_1.SAVESTAT")
+    emu._session_serial = None
+    emu._leftover_snapshot = rpcs3._state_snapshot("BLUS30443")
+
+    emu.save_and_exit(None)
+
+    assert not stale.exists()
+    assert emu._leftover_snapshot is None
+
+
+def test_exit_asks_pine_only_when_the_title_is_unknown_and_rpcs3_is_alive(
+    rpcs3_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A known title, or a dead process, never waits on the PINE socket."""
+    emu = rpcs3.Rpcs3()
+    monkeypatch.setattr(rpcs3, "_pine_title_id", lambda: pytest.fail("PINE asked needlessly"))
+    monkeypatch.setattr(rpcs3.Rpcs3, "alive", lambda self: False)
+    emu._session_serial = None
+    emu.save_and_exit(None)
+
+    monkeypatch.setattr(rpcs3.Rpcs3, "alive", lambda self: True)
+    emu._session_serial = "BLUS30443"
+    emu.save_and_exit(None)
 
 
 def test_exit_reports_the_state_the_hotkey_wrote(
