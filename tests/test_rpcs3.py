@@ -761,49 +761,13 @@ def test_holds_open_is_false_without_a_process_handle(tmp_path: Path) -> None:
 
 @needs_procfs
 def test_holds_open_sees_a_descriptor_the_test_process_itself_holds(tmp_path: Path) -> None:
-    """A writable descriptor on the state file reads as a write still in flight."""
+    """An open descriptor on the state file reads as held, read-only included."""
     target = tmp_path / "BLUS30443_1.SAVESTAT"
     target.write_bytes(b"state")
 
-    with target.open("r+b"):
+    with target.open("rb"):
         assert rpcs3._holds_open(os.getpid(), target) is True
     assert rpcs3._holds_open(os.getpid(), target) is False
-
-
-@needs_procfs
-def test_holds_open_ignores_a_read_only_descriptor(tmp_path: Path) -> None:
-    """The hotkey's reboot reading the new state back is not a write.
-
-    Counting it would hold the settle until STATE_WAIT ran out and report
-    no save for a state that finished writing.
-    """
-    target = tmp_path / "BLUS30443_1.SAVESTAT"
-    target.write_bytes(b"state")
-
-    with target.open("rb"):
-        assert rpcs3._holds_open(os.getpid(), target) is False
-    with target.open("ab"):
-        assert rpcs3._holds_open(os.getpid(), target) is True
-
-
-@needs_procfs
-def test_holds_open_counts_a_descriptor_of_unknown_mode_as_a_writer(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An fdinfo that can't be read must not let a write in flight settle early."""
-    target = tmp_path / "BLUS30443_1.SAVESTAT"
-    target.write_bytes(b"state")
-    real_read_text = Path.read_text
-
-    def deny_fdinfo(self: Path, *args: object, **kwargs: object) -> str:
-        if "/fdinfo/" in str(self):
-            raise PermissionError("denied")
-        return real_read_text(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "read_text", deny_fdinfo)
-
-    with target.open("rb"):
-        assert rpcs3._holds_open(os.getpid(), target) is True
 
 
 @needs_procfs
@@ -812,7 +776,7 @@ def test_holds_open_sees_a_descriptor_held_by_a_child_of_the_leader(tmp_path: Pa
     target = tmp_path / "BLUS30443_1.SAVESTAT"
     target.write_bytes(b"state")
     quoted = shlex.quote(str(target))
-    proc = _run_in_own_session(f"sh -c 'exec 3>>{quoted}; sleep 30' & wait")
+    proc = _run_in_own_session(f"sh -c 'exec 3<{quoted}; sleep 30' & wait")
     try:
         assert _wait_until(lambda: rpcs3._holds_open(proc.pid, target))
         # The leader never opened the file, so only the group scan can see the write.
@@ -832,7 +796,7 @@ def test_holds_open_resolves_the_state_file_through_a_symlink(tmp_path: Path) ->
     link = tmp_path / "link"
     link.symlink_to(real, target_is_directory=True)
 
-    with target.open("r+b"):
+    with target.open("rb"):
         assert rpcs3._holds_open(os.getpid(), link / target.name) is True
 
 
@@ -948,61 +912,15 @@ def test_wait_for_state_write_never_hands_back_a_zero_byte_state(
     assert result is None
 
 
-def test_wait_for_state_write_waits_while_rpcs3_still_holds_the_file_open(
-    rpcs3_dirs: dict[str, Path], sleep_clock: _SleepClock, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A steady size over an open descriptor is a stalled write, not a finished one.
-
-    RPCS3 compresses a state as it writes it, so a busy host can hold the
-    size still for a whole poll window mid-write.
-    """
-    serial = "BLUS30443"
-    before = rpcs3._state_snapshot(serial)
-    target = _touch(rpcs3_dirs["sstate_root"] / serial / f"{serial}_1.SAVESTAT")
-    calls = {"n": 0}
-
-    def open_for_a_while(pid: Optional[int], path: Path) -> bool:
-        assert pid == 4242
-        assert path == target
-        calls["n"] += 1
-        return calls["n"] < 4
-
-    monkeypatch.setattr(rpcs3, "_holds_open", open_for_a_while)
-
-    result = rpcs3._wait_for_state_write(serial, before, sleep_clock.monotonic() + 30.0, 4242)
-
-    assert result == target
-    assert calls["n"] == 4
-
-
-def test_wait_for_state_write_times_out_while_the_file_is_still_held_open(
-    rpcs3_dirs: dict[str, Path], sleep_clock: _SleepClock, monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A descriptor never released before the deadline must report no save."""
-    serial = "BLUS30443"
-    before = rpcs3._state_snapshot(serial)
-    _touch(rpcs3_dirs["sstate_root"] / serial / f"{serial}_1.SAVESTAT")
-    monkeypatch.setattr(rpcs3, "_holds_open", lambda _pid, _path: True)
-
-    with caplog.at_level(logging.WARNING):
-        result = rpcs3._wait_for_state_write(serial, before, sleep_clock.monotonic() + 5.0, 4242)
-
-    assert result is None
-    assert "never settled" in caplog.text
-
-
-def test_wait_for_state_write_falls_back_to_size_alone_without_a_pid(
+def test_wait_for_state_write_never_takes_rpcs3s_unfinished_temp_for_the_state(
     rpcs3_dirs: dict[str, Path], sleep_clock: _SleepClock
 ) -> None:
-    """No process handle leaves the size test as the only confirmation there is."""
+    """Mid-write the state exists only as fs::pending_file's temp, never under its final name."""
     serial = "BLUS30443"
     before = rpcs3._state_snapshot(serial)
-    target = _touch(rpcs3_dirs["sstate_root"] / serial / f"{serial}_1.SAVESTAT")
+    _touch(rpcs3_dirs["sstate_root"] / serial / f"\uff04{serial}_1.SAVESTAT.zst.3kQ9xZ.tmp")
 
-    result = rpcs3._wait_for_state_write(serial, before, sleep_clock.monotonic() + 5.0, None)
-
-    assert result == target
+    assert rpcs3._wait_for_state_write(serial, before, sleep_clock.monotonic() + 5.0) is None
 
 
 # -- launch() resume selection --
@@ -1276,20 +1194,20 @@ def test_verify_boot_target_accepts_an_extraction(
 def test_wait_for_reboot_load_waits_until_the_reboot_drops_its_read(
     tmp_path: Path, sleep_clock: _SleepClock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The reboot's read-only descriptor counts here, unlike in the write settle."""
+    """The reboot holds the new state open read-only until the game runs again."""
     target = _touch(tmp_path / "BLUS30443_1.SAVESTAT")
     seen: list[bool] = []
 
-    def held_for_a_while(pid: Optional[int], path: Path, writers_only: bool = True) -> bool:
+    def held_for_a_while(pid: Optional[int], path: Path) -> bool:
         assert (pid, path) == (4242, target)
-        seen.append(writers_only)
+        seen.append(True)
         return len(seen) < 4
 
     monkeypatch.setattr(rpcs3, "_holds_open", held_for_a_while)
 
     rpcs3._wait_for_reboot_load(4242, target, sleep_clock.monotonic() + 30.0)
 
-    assert seen == [False] * 4
+    assert len(seen) == 4
 
 
 def test_wait_for_reboot_load_gives_up_at_the_deadline(
@@ -1300,7 +1218,7 @@ def test_wait_for_reboot_load_gives_up_at_the_deadline(
 ) -> None:
     """A load still running at the deadline logs and returns; the state is already written."""
     target = _touch(tmp_path / "BLUS30443_1.SAVESTAT")
-    monkeypatch.setattr(rpcs3, "_holds_open", lambda _pid, _path, writers_only=True: True)
+    monkeypatch.setattr(rpcs3, "_holds_open", lambda _pid, _path: True)
     deadline = sleep_clock.monotonic() + 5.0
 
     with caplog.at_level(logging.WARNING):
@@ -1367,171 +1285,33 @@ def test_exit_reports_the_state_the_hotkey_wrote(
     "RPCS3_SAVE_STATE_KEY" in os.environ,
     reason="RPCS3_SAVE_STATE_KEY overrides the default this test pins",
 )
-def test_exit_sends_rpcs3s_savestate_shortcut_by_default(
-    rpcs3_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The exit hotkey is gw_savestate's ctrl+s, not a gw_savestate_N slot key.
-
-    ctrl+alt+1..4 boot the game from a saved slot and write nothing, so an
-    exit sending one of those waits out STATE_WAIT and reports no save.
-    """
-    emu = rpcs3.Rpcs3()
-    emu._session_serial = "BLUS30443"
-    monkeypatch.setattr(rpcs3.Rpcs3, "alive", lambda self: True)
-    monkeypatch.setattr(
-        rpcs3, "_wait_for_state_write", lambda serial, before, deadline, pid=None: None
-    )
-    emu.stop = lambda: None
-    sent: list[str] = []
-
-    def fake_send_key(key: str) -> bool:
-        sent.append(key)
-        return True
-
-    emu._send_key = fake_send_key
-
-    emu.save_and_exit(1)
-
-    assert sent == ["ctrl+s"]
+def test_the_exit_hotkey_defaults_to_rpcs3s_savestate_shortcut() -> None:
+    """ctrl+s is gw_savestate; ctrl+alt+1..4 boot a saved slot and write nothing."""
+    assert rpcs3._SAVE_STATE_KEY == "ctrl+s"
 
 
-@pytest.mark.parametrize(
-    ("key", "expected"),
-    [
-        ("ctrl+alt+1", True),
-        ("alt+ctrl+4", True),
-        (" Ctrl+Alt+2 ", True),
-        ("ctrl+s", False),
-        ("ctrl+alt+5", False),
-        ("shift+ctrl+alt+1", False),
-    ],
-)
-def test_is_slot_boot_key_matches_only_the_savestate_slot_defaults(key: str, expected: bool) -> None:
-    """Only RPCS3's default Ctrl+Alt+1..4 slot bindings count as slot boot keys.
-
-    Args:
-        key: The xdotool key spec under test.
-        expected: Whether it should read as a slot boot shortcut.
-    """
-    assert rpcs3._is_slot_boot_key(key) is expected
-
-
-def test_exit_names_a_slot_boot_key_when_no_state_appears(
+def test_exit_names_the_hotkey_when_no_state_appears(
     rpcs3_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A deployment still pinned to the old ctrl+alt+1 gets told why nothing saved.
-
-    That key boots slot 1 instead of saving, so the exit times out with no
-    state; the warning has to name the key rather than leave a bare timeout.
-    """
-    emu = rpcs3.Rpcs3()
-    emu._session_serial = "BLUS30443"
-    monkeypatch.setattr(rpcs3.Rpcs3, "alive", lambda self: True)
+    """A key bound to a slot boot saves nothing, so the timeout has to say what was sent."""
+    emu = _exit_confirming(monkeypatch, None)
     monkeypatch.setattr(rpcs3, "_SAVE_STATE_KEY", "ctrl+alt+1")
-    monkeypatch.setattr(
-        rpcs3, "_wait_for_state_write", lambda serial, before, deadline, pid=None: None
-    )
-    emu._send_key = lambda key: True
     emu.stop = lambda: None
 
     with caplog.at_level(logging.WARNING):
         emu.save_and_exit(1)
 
-    assert "RPCS3_SAVE_STATE_KEY=ctrl+alt+1" in caplog.text
-
-
-def test_exit_does_not_blame_the_key_when_ctrl_s_saves_nothing(
-    rpcs3_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """The slot-key warning only fires for a slot key, not for every timeout."""
-    emu = rpcs3.Rpcs3()
-    emu._session_serial = "BLUS30443"
-    monkeypatch.setattr(rpcs3.Rpcs3, "alive", lambda self: True)
-    monkeypatch.setattr(rpcs3, "_SAVE_STATE_KEY", "ctrl+s")
-    monkeypatch.setattr(
-        rpcs3, "_wait_for_state_write", lambda serial, before, deadline, pid=None: None
-    )
-    emu._send_key = lambda key: True
-    emu.stop = lambda: None
-
-    with caplog.at_level(logging.WARNING):
-        emu.save_and_exit(1)
-
-    assert "no new state file appeared" in caplog.text
-    assert "RPCS3_SAVE_STATE_KEY" not in caplog.text
-
-
-def _pending_state_write(state_dir: Path) -> Path:
-    """Leave an unfinished `fs::pending_file` state write in `state_dir`.
-
-    Args:
-        state_dir: The title's savestates dir.
-
-    Returns:
-        The temp file, named the way RPCS3 names one mid-write.
-    """
-    return _touch(state_dir / f"{rpcs3._PENDING_FILE_PREFIX}BLUS30443_1.SAVESTAT.zst.3kQ9xZ.tmp")
-
-
-def test_exit_drops_a_state_write_the_stop_interrupted(
-    rpcs3_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A kill mid-write leaves a temp file that must not ship as a state.
-
-    The exit dump files everything under the savestates subtree as a state,
-    so the half-written temp would travel into the archive beside the real
-    states. A finished state next to it stays.
-    """
-    state_dir = rpcs3_dirs["sstate_root"] / "BLUS30443"
-    finished = _touch(state_dir / "BLUS30443_0.SAVESTAT.zst")
-    pending = _pending_state_write(state_dir)
-    emu = rpcs3.Rpcs3()
-    emu._session_serial = "BLUS30443"
-    running = {"alive": True}
-    monkeypatch.setattr(rpcs3.Rpcs3, "alive", lambda self: running["alive"])
-    monkeypatch.setattr(
-        rpcs3, "_wait_for_state_write", lambda serial, before, deadline, pid=None: None
-    )
-    emu._send_key = lambda key: True
-    emu.stop = lambda: running.__setitem__("alive", False)
-
-    emu.save_and_exit(1)
-
-    assert not pending.exists()
-    assert finished.exists()
-
-
-def test_exit_leaves_a_state_write_alone_while_rpcs3_survives_the_stop(
-    rpcs3_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A process that outlived the stop may still be writing, so its temp stays."""
-    pending = _pending_state_write(rpcs3_dirs["sstate_root"] / "BLUS30443")
-    emu = rpcs3.Rpcs3()
-    emu._session_serial = "BLUS30443"
-    monkeypatch.setattr(rpcs3.Rpcs3, "alive", lambda self: True)
-    monkeypatch.setattr(
-        rpcs3, "_wait_for_state_write", lambda serial, before, deadline, pid=None: None
-    )
-    emu._send_key = lambda key: True
-    emu.stop = lambda: None
-
-    emu.save_and_exit(1)
-
-    assert pending.exists()
+    assert "no new state file appeared after sending ctrl+alt+1" in caplog.text
 
 
 def test_exit_waits_for_the_reboot_load_before_restamping_and_stopping(
     rpcs3_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Stopping mid-reboot can kill a game data rewrite the dump would then ship."""
-    emu = rpcs3.Rpcs3()
-    emu._session_serial = "BLUS30443"
-    emu._proc = SimpleNamespace(pid=4242)
-    monkeypatch.setattr(rpcs3.Rpcs3, "alive", lambda self: True)
-    written = _touch(rpcs3_dirs["sstate_root"] / "BLUS30443" / "BLUS30443_1.SAVESTAT")
-    monkeypatch.setattr(
-        rpcs3, "_wait_for_state_write", lambda serial, before, deadline, pid=None: written
+    emu = _exit_confirming(
+        monkeypatch, rpcs3_dirs["sstate_root"] / "BLUS30443" / "BLUS30443_1.SAVESTAT"
     )
+    emu._proc = SimpleNamespace(pid=4242)
     order: list[str] = []
     monkeypatch.setattr(
         rpcs3,
@@ -1540,29 +1320,39 @@ def test_exit_waits_for_the_reboot_load_before_restamping_and_stopping(
     )
     monkeypatch.setattr(rpcs3.Rpcs3, "_session_save_dirs", lambda self: order.append("restamp") or [])
     emu.stop = lambda: order.append("stop")
-    emu._send_key = lambda key: True
 
     assert emu.save_and_exit(1)["state_saved"] is True
     assert order == ["load 4242 BLUS30443_1.SAVESTAT", "restamp", "stop"]
+
+
+def test_exit_waits_on_no_pid_when_the_broker_holds_no_handle(
+    rpcs3_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no process handle the reboot wait has nothing to watch and must not guess one."""
+    emu = _exit_confirming(
+        monkeypatch, rpcs3_dirs["sstate_root"] / "BLUS30443" / "BLUS30443_1.SAVESTAT"
+    )
+    seen: list[Optional[int]] = []
+    monkeypatch.setattr(
+        rpcs3, "_wait_for_reboot_load", lambda pid, path, deadline: seen.append(pid)
+    )
+    emu.stop = lambda: None
+
+    assert emu.save_and_exit(1)["state_saved"] is True
+    assert seen == [None]
 
 
 def test_exit_skips_the_reboot_wait_when_no_state_was_saved(
     rpcs3_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With no state written there is no reboot to wait for."""
-    emu = rpcs3.Rpcs3()
-    emu._session_serial = "BLUS30443"
-    monkeypatch.setattr(rpcs3.Rpcs3, "alive", lambda self: True)
-    monkeypatch.setattr(
-        rpcs3, "_wait_for_state_write", lambda serial, before, deadline, pid=None: None
-    )
+    emu = _exit_confirming(monkeypatch, None)
     monkeypatch.setattr(
         rpcs3,
         "_wait_for_reboot_load",
         lambda pid, path, deadline: pytest.fail("waited on a reboot with no state"),
     )
     emu.stop = lambda: None
-    emu._send_key = lambda key: True
 
     assert emu.save_and_exit(1)["state_saved"] is False
 
@@ -1590,7 +1380,7 @@ def test_exit_reports_no_save_when_no_new_state_appears(
     monkeypatch.setattr(rpcs3.Rpcs3, "alive", lambda self: True)
     emu._send_key = lambda key: True
     monkeypatch.setattr(
-        rpcs3, "_wait_for_state_write", lambda serial, before, deadline, pid=None: None
+        rpcs3, "_wait_for_state_write", lambda serial, before, deadline: None
     )
 
     report = emu.save_and_exit(1)
@@ -1613,7 +1403,7 @@ def test_exit_does_not_abort_the_save_dump_when_the_state_file_disappears_before
     emu._send_key = lambda key: True
     missing = rpcs3_dirs["sstate_root"] / "BLUS30443" / "BLUS30443_1.SAVESTAT"
     monkeypatch.setattr(
-        rpcs3, "_wait_for_state_write", lambda serial, before, deadline, pid=None: missing
+        rpcs3, "_wait_for_state_write", lambda serial, before, deadline: missing
     )
     stopped = {"called": False}
     emu.stop = lambda: stopped.__setitem__("called", True)
@@ -1622,55 +1412,6 @@ def test_exit_does_not_abort_the_save_dump_when_the_state_file_disappears_before
 
     assert report == {"state_saved": False, "state_slot": 1, "state_file": None}
     assert stopped["called"] is True
-
-
-def test_exit_hands_the_running_pid_to_the_write_confirmation(
-    rpcs3_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The write confirmation needs the launch pid to read its open descriptors.
-
-    Without it every write looks closed and a stalled save is archived as a
-    finished one.
-    """
-    emu = rpcs3.Rpcs3()
-    emu._session_serial = "BLUS30443"
-    emu._proc = SimpleNamespace(pid=4242)
-    monkeypatch.setattr(rpcs3.Rpcs3, "alive", lambda self: True)
-    emu._send_key = lambda key: True
-    emu.stop = lambda: None
-    seen: dict = {}
-
-    def record(serial: Optional[str], before: dict, deadline: float, pid: Optional[int]) -> None:
-        seen["pid"] = pid
-        return None
-
-    monkeypatch.setattr(rpcs3, "_wait_for_state_write", record)
-
-    emu.save_and_exit(1)
-
-    assert seen["pid"] == 4242
-
-
-def test_exit_passes_no_pid_when_the_broker_holds_no_handle(
-    rpcs3_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A save with no process handle must still run, on the size test alone."""
-    emu = rpcs3.Rpcs3()
-    emu._session_serial = "BLUS30443"
-    monkeypatch.setattr(rpcs3.Rpcs3, "alive", lambda self: True)
-    emu._send_key = lambda key: True
-    emu.stop = lambda: None
-    seen: dict = {}
-
-    def record(serial: Optional[str], before: dict, deadline: float, pid: Optional[int]) -> None:
-        seen["pid"] = pid
-        return None
-
-    monkeypatch.setattr(rpcs3, "_wait_for_state_write", record)
-
-    emu.save_and_exit(1)
-
-    assert seen["pid"] is None
 
 
 # -- state_path: the exit state RomM files in its library --
@@ -1688,7 +1429,7 @@ def _exit_confirming(monkeypatch: pytest.MonkeyPatch, state: Optional[Path]) -> 
     monkeypatch.setattr(
         rpcs3,
         "_wait_for_state_write",
-        lambda serial, before, deadline, pid=None: None if state is None else _touch(state),
+        lambda serial, before, deadline: None if state is None else _touch(state),
     )
     return emu
 

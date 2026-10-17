@@ -108,8 +108,6 @@ _LICENSE_EXTS = (".rap", ".edat")
 _TITLE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 _LOCK_DIR_PREFIXES = ("$", "\uff04")
 """Name prefixes of RPCS3's own lock folders under `game/`: an ASCII and a full-width dollar sign."""
-_PENDING_FILE_PREFIX = "\uff04"
-"""Full-width dollar sign RPCS3's `fs::pending_file` puts in front of an unfinished write's temp name."""
 
 
 # Decrypted PS3 dumps run 2-25GB. An archive is extracted once into
@@ -1032,49 +1030,6 @@ def _clear_leftover_states(title_id: str, before: dict) -> None:
             log.debug("rpcs3: cleared leftover savestate %s for %s", p, title_id)
 
 
-def _clear_interrupted_state_writes(serial: Optional[str]) -> None:
-    """Drop the temp file a state write killed before it finished leaves behind.
-
-    RPCS3 writes a state through `fs::pending_file` (Utilities/File.cpp): a
-    `_PENDING_FILE_PREFIX<name>.<id>.tmp` beside the final file, renamed over
-    it only once the write completes. A kill before then (the write outlasting
-    STATE_WAIT, or a player's own hotkey still writing at exit) never runs the
-    cleanup, and the temp sits in the savestates subtree the exit dump ships,
-    filed as a state. Only call this once the process is gone.
-
-    Args:
-        serial: Title id scoping the state dir to clean, or None to skip.
-    """
-    d = _state_dir_for(serial)
-    if d is None or not d.is_dir():
-        return
-    try:
-        leftovers = list(d.glob(f"{_PENDING_FILE_PREFIX}*.tmp"))
-    except OSError as exc:
-        log.warning("rpcs3: could not list %s for interrupted state writes: %s", d, exc)
-        return
-    for p in leftovers:
-        try:
-            p.unlink()
-        except OSError as exc:
-            log.warning("rpcs3: could not remove interrupted state write %s: %s", p, exc)
-        else:
-            log.info("rpcs3: removed interrupted state write %s", p.name)
-
-
-def _is_slot_boot_key(key: str) -> bool:
-    """Tell whether `key` is the default binding of a gw_savestate_1..4 shortcut.
-
-    Args:
-        key: An xdotool key spec, e.g. `ctrl+alt+1`.
-
-    Returns:
-        True for Ctrl+Alt+1..4 in either modifier order: RPCS3's bindings for
-        booting from a saved slot, which never write a state.
-    """
-    return re.fullmatch(r"(ctrl\+alt|alt\+ctrl)\+[1-4]", key.strip().lower()) is not None
-
-
 def _clear_stale_save_data() -> None:
     """Empty the cellSaveData and cellGameData trees before an archive restore.
 
@@ -1204,57 +1159,23 @@ def _launch_pids(pid: Optional[int]) -> list[int]:
     return found or [pid]
 
 
-def _opened_for_writing(fd: Path) -> bool:
-    """Tell whether descriptor `fd` (a `/proc/<pid>/fd` entry) can write.
-
-    Args:
-        fd: The descriptor's `/proc/<pid>/fd/<n>` path.
-
-    Returns:
-        True when its open flags carry O_WRONLY or O_RDWR, or when
-        `/proc/<pid>/fdinfo` can't be read: an unknown mode counts as a
-        writer, so a descriptor that can't be classified never lets a write
-        in flight settle early.
-    """
-    try:
-        for line in Path(f"{fd.parent.parent}/fdinfo/{fd.name}").read_text().splitlines():
-            if line.startswith("flags:"):
-                return (int(line.split()[1], 8) & os.O_ACCMODE) != os.O_RDONLY
-    except (OSError, ValueError, IndexError) as exc:
-        log.debug("rpcs3: could not read the open mode of fd %s: %s", fd, exc)
-    return True
-
-
-def _holds_open(pid: Optional[int], path: Path, writers_only: bool = True) -> bool:
+def _holds_open(pid: Optional[int], path: Path) -> bool:
     """Tell whether the launch `pid` leads still has `path` open.
-
-    A file the writer has not closed yet is a write still in flight, however
-    long its size happens to sit still: RPCS3 compresses a state as it writes
-    it, and a busy or stalled host can leave the file the same size for a
-    full poll window mid-write. A read-only descriptor is not a write: the
-    save-state hotkey reboots the game into the state it just wrote, and
-    that boot reading the file back holds one until the game runs again.
 
     Args:
         pid: The emulator process, or None when the broker holds no handle on it.
-        path: The state file being watched.
-        writers_only: Count only writable descriptors. False counts any
-            descriptor, which is how the reboot's read shows.
+        path: The file being watched.
 
     Returns:
-        True only when a matching descriptor is confirmed open. No pid, a
-        `/proc` that cannot be read, and a process already gone all read as
-        False, so the size test stays the answer where this one cannot
-        contribute.
+        True only when the descriptor is confirmed open. No pid, a `/proc`
+        that cannot be read, and a process already gone all read as False.
     """
     target = os.path.realpath(path)
     for candidate in _launch_pids(pid):
         try:
             for fd in Path(f"/proc/{candidate}/fd").iterdir():
                 try:
-                    if os.path.realpath(fd) == target and (
-                        not writers_only or _opened_for_writing(fd)
-                    ):
+                    if os.path.realpath(fd) == target:
                         return True
                 except OSError as exc:
                     log.debug("rpcs3: could not resolve fd %s of pid %s: %s", fd, candidate, exc)
@@ -1280,34 +1201,26 @@ def _wait_for_reboot_load(pid: Optional[int], path: Path, deadline: float) -> No
         deadline: `time.monotonic` value to stop waiting at; passing it only
             logs, since the state is already written.
     """
-    while _holds_open(pid, path, writers_only=False):
+    while _holds_open(pid, path):
         if time.monotonic() >= deadline:
             log.warning("save-and-exit: stopping rpcs3 before it finished loading %s", path.name)
             return
         time.sleep(0.2)
 
 
-def _wait_for_state_write(
-    serial: Optional[str],
-    before: dict,
-    deadline: float,
-    pid: Optional[int] = None,
-) -> Optional[Path]:
-    """Poll until the title's savestate write stabilizes, or the deadline passes.
+def _wait_for_state_write(serial: Optional[str], before: dict, deadline: float) -> Optional[Path]:
+    """Poll until the title's new savestate appears and settles, or the deadline passes.
 
-    A write counts as finished once the file is non-empty, rpcs3 holds no
-    writable descriptor on it, and its size has held steady for STABLE_SECS.
-    Size alone is not proof, since an emulator stalled mid-write holds a
-    steady size over a truncated file, and a state that has only been created
-    is zero bytes of nothing. The hotkey reboots the game from the new state
-    once it is written, so the process staying up says nothing either way.
+    RPCS3 writes a state through `fs::pending_file` (Utilities/File.cpp): a
+    `＄<name>.<id>.tmp` temp that `_state_snapshot` never matches, renamed to
+    the final name once complete. So a file under the final name is already
+    whole; it counts once it is non-empty and its size has held steady for
+    STABLE_SECS, a guard against a host that writes it some other way.
 
     Args:
         serial: Title id scoping the state dir to watch.
         before: Snapshot from `_state_snapshot` taken before the hotkey was sent.
         deadline: `time.monotonic` value to give up at.
-        pid: The running rpcs3 process, whose open descriptors say whether the
-            write has finished; None falls back to the size test alone.
 
     Returns:
         The settled state file, or None on timeout.
@@ -1336,17 +1249,15 @@ def _wait_for_state_write(
             stable_since is not None
             and time.monotonic() - stable_since >= STABLE_SECS
             and last_size
-            and not _holds_open(pid, target)
         ):
             log.info("save state write complete: %s (%d bytes)", target.name, last_size)
             return target
         time.sleep(POLL_SECS)
     if target is not None:
         log.warning(
-            "save state write never settled before the deadline: %s (%s bytes, pid %s)",
+            "save state write never settled before the deadline: %s (%s bytes)",
             target,
             last_size,
-            pid,
         )
     return None
 
@@ -2154,6 +2065,37 @@ class Rpcs3(Emulator):
         else:
             log.warning("boot watchdog: rpcs3 exited before ever reporting running")
 
+    def _save_exit_state(self) -> Optional[dict]:
+        """Send the save-state hotkey and wait for its state and the reboot after it.
+
+        Returns:
+            The new state's path, size, and mtime, or None when none was saved.
+        """
+        if not self._session_serial:
+            log.warning("save-and-exit: no known title id, cannot locate a state to save")
+            return None
+        before = _state_snapshot(self._session_serial)
+        if not self._send_key(_SAVE_STATE_KEY):
+            log.warning("save-and-exit: could not send the save-state hotkey")
+            return None
+        deadline = time.monotonic() + STATE_WAIT
+        p = _wait_for_state_write(self._session_serial, before, deadline)
+        if p is None:
+            log.warning(
+                "save-and-exit: no new state file appeared after sending %s, which has to be "
+                "RPCS3's Savestate shortcut (not a ctrl+alt+1-4 slot boot)",
+                _SAVE_STATE_KEY,
+            )
+            return None
+        try:
+            st = p.stat()
+        except OSError as exc:
+            log.warning("save-and-exit: could not stat saved state %s: %s", p, exc)
+            return None
+        self._exit_state = p
+        _wait_for_reboot_load(self._proc.pid if self._proc is not None else None, p, deadline)
+        return {"path": str(p), "size": st.st_size, "mtime": st.st_mtime}
+
     def save_and_exit(self, slot: Optional[int]) -> dict:
         """Send the save-state hotkey, then stop the emulator.
 
@@ -2164,38 +2106,7 @@ class Rpcs3(Emulator):
             A dict with `state_saved`, `state_slot`, and `state_file` (path,
             size, and mtime of the new state file, or None if none was saved).
         """
-        saved = False
-        state_file = None
-        if slot is not None and self.alive():
-            if not self._session_serial:
-                log.warning("save-and-exit: no known title id, cannot locate a state to save")
-            else:
-                before = _state_snapshot(self._session_serial)
-                if not self._send_key(_SAVE_STATE_KEY):
-                    log.warning("save-and-exit: could not send the save-state hotkey")
-                else:
-                    deadline = time.monotonic() + STATE_WAIT
-                    pid = self._proc.pid if self._proc is not None else None
-                    p = _wait_for_state_write(self._session_serial, before, deadline, pid)
-                    if p is None:
-                        log.warning("save-and-exit: no new state file appeared")
-                        if _is_slot_boot_key(_SAVE_STATE_KEY):
-                            log.warning(
-                                "save-and-exit: RPCS3_SAVE_STATE_KEY=%s is a Savestate 1-4 "
-                                "slot shortcut by default, which boots a saved slot instead "
-                                "of saving; set it to RPCS3's Savestate shortcut (ctrl+s)",
-                                _SAVE_STATE_KEY,
-                            )
-                    else:
-                        try:
-                            st = p.stat()
-                        except OSError as exc:
-                            log.warning("save-and-exit: could not stat saved state %s: %s", p, exc)
-                        else:
-                            saved = True
-                            state_file = {"path": str(p), "size": st.st_size, "mtime": st.st_mtime}
-                            self._exit_state = p
-                            _wait_for_reboot_load(pid, p, deadline)
+        state_file = self._save_exit_state() if slot is not None and self.alive() else None
 
         # The dump ships files newer than the session baseline. A save is a
         # directory tree the game rewrites only partially, and sibling dirs
@@ -2211,9 +2122,7 @@ class Rpcs3(Emulator):
                         log.warning("could not restamp %s, may be dropped from the dump: %s", p, exc)
 
         self.stop()
-        if not self.alive():
-            _clear_interrupted_state_writes(self._session_serial)
-        return {"state_saved": saved, "state_slot": slot, "state_file": state_file}
+        return {"state_saved": state_file is not None, "state_slot": slot, "state_file": state_file}
 
     def state_path(self) -> Optional[Path]:
         """Return the state the last saving exit confirmed, or None.
