@@ -29,9 +29,9 @@ its state library.
 PINE: RPCS3's IPC is PINE-compatible but only implements the protocol's
 generic opcodes (memory access, version/title/status queries) - there is no
 save/load-state opcode the way PCSX2's variant adds one. The broker uses it
-for nothing but boot verification (MsgStatus) and, for boots (a bare .iso)
-whose title id the on-disk layout cannot supply, a title id lookup (MsgID)
-once the game is confirmed running.
+for nothing but boot verification (MsgStatus) and, for boots whose title id
+the boot target cannot supply (an .iso with no readable PARAM.SFO), a title
+id lookup (MsgID) once the game is confirmed running.
 
 RPCS3 installs no signal handler, so a plain kill (no state requested, or
 the hotkey/wait having failed) is a safe stop: whatever the game already
@@ -55,7 +55,7 @@ import time
 from collections.abc import Iterable
 from pathlib import Path
 from threading import Thread
-from typing import Optional, Union
+from typing import BinaryIO, Optional, Union
 
 from .. import imports, settings
 from . import extraction_cache, pine
@@ -475,12 +475,17 @@ def _valid_title_id(title_id: Optional[str]) -> Optional[str]:
 
 
 def _sfo_title_id(sfo: Path) -> Optional[str]:
-    """TITLE_ID string from a PARAM.SFO (key/data table pairs indexed from a fixed-size header)."""
+    """TITLE_ID string from a PARAM.SFO file."""
     try:
         data = sfo.read_bytes()
     except OSError as exc:
         log.debug("rpcs3: could not read %s for its title id: %s", sfo, exc)
         return None
+    return _sfo_data_title_id(data)
+
+
+def _sfo_data_title_id(data: bytes) -> Optional[str]:
+    """TITLE_ID string from PARAM.SFO bytes (key/data table pairs indexed from a fixed-size header)."""
     if len(data) < 0x14 or data[:4] != b"\x00PSF":
         return None
     key_start = int.from_bytes(data[0x08:0x0C], "little")
@@ -499,6 +504,52 @@ def _sfo_title_id(sfo: Path) -> Optional[str]:
             value = data[data_start + data_off : data_start + data_off + data_len]
             return _valid_title_id(value.split(b"\0", 1)[0].decode("ascii", "replace"))
     return None
+
+
+_ISO_SECTOR = 2048
+_ISO_DIR_MAX = 1 << 20
+"""Most bytes read of one ISO9660 directory; a disc's PS3_GAME holds a handful of entries."""
+_SFO_MAX = 1 << 16
+
+
+def _iso_dir_entries(f: BinaryIO, extent: int, size: int) -> dict[str, tuple[int, int]]:
+    """Map each name in one ISO9660 directory to its (extent, size), version suffix dropped."""
+    f.seek(extent * _ISO_SECTOR)
+    data = f.read(min(size, _ISO_DIR_MAX))
+    entries: dict[str, tuple[int, int]] = {}
+    i = 0
+    while i < len(data):
+        n = data[i]
+        if n == 0:
+            # Records never straddle a sector; the rest of this one is padding.
+            i = (i // _ISO_SECTOR + 1) * _ISO_SECTOR
+            continue
+        if n < 34 or i + n > len(data):
+            break
+        rec = data[i : i + n]
+        name = rec[33 : 33 + rec[32]].decode("ascii", "replace").split(";", 1)[0].upper()
+        entries[name] = (int.from_bytes(rec[2:6], "little"), int.from_bytes(rec[10:14], "little"))
+        i += n
+    return entries
+
+
+def _iso_title_id(iso: Path) -> Optional[str]:
+    """TITLE_ID from `PS3_GAME/PARAM.SFO` inside a decrypted disc image's ISO9660 tree."""
+    with iso.open("rb") as f:
+        f.seek(16 * _ISO_SECTOR)
+        pvd = f.read(190)
+        if len(pvd) < 190 or pvd[:6] != b"\x01CD001":
+            return None
+        root = pvd[156:190]
+        root_entries = _iso_dir_entries(
+            f, int.from_bytes(root[2:6], "little"), int.from_bytes(root[10:14], "little")
+        )
+        game = root_entries.get("PS3_GAME")
+        sfo = _iso_dir_entries(f, *game).get("PARAM.SFO") if game else None
+        if sfo is None:
+            return None
+        f.seek(sfo[0] * _ISO_SECTOR)
+        return _sfo_data_title_id(f.read(min(sfo[1], _SFO_MAX)))
 
 
 def _is_safe_boot_candidate(candidate: Path, root_real: Path) -> bool:
@@ -910,9 +961,9 @@ def _rom_title_id(rom: Path) -> Optional[str]:
     """Title id a boot target carries in its own layout or header.
 
     An installed title boots from `game/<title id>/USRDIR/EBOOT.BIN`, a PKG
-    embeds the id in its content id, and a disc rip carries a PARAM.SFO
-    beside USRDIR. A bare .iso and an archive carry none of those, so their
-    id only turns up over PINE once the game is confirmed running.
+    embeds the id in its content id, and a disc rip or a decrypted .iso
+    carries a PARAM.SFO under PS3_GAME. An archive's id only turns up once
+    it is extracted, or over PINE once the game is confirmed running.
 
     Args:
         rom: The resolved boot target.
@@ -923,6 +974,8 @@ def _rom_title_id(rom: Path) -> Optional[str]:
     try:
         if rom.suffix.lower() == ".pkg":
             return _pkg_title_id(rom)
+        if rom.suffix.lower() == ".iso":
+            return _iso_title_id(rom)
         if rom.name.upper().startswith("EBOOT"):
             if rom.is_relative_to(GAME_DIR):
                 return _valid_title_id(rom.parent.parent.name)
@@ -1579,8 +1632,9 @@ class Rpcs3(Emulator):
     """Pre-restore savestate snapshot from clear_working_slot, or None.
 
     Only set when clear_working_slot ran without a title id to scope its
-    clear to (a bare .iso or an archive). Consumed and cleared the moment
-    this session's title id becomes known, by _clear_leftover_states.
+    clear to (an archive, or an .iso with no readable PARAM.SFO). Consumed
+    and cleared the moment this session's title id becomes known, by
+    _clear_leftover_states.
     """
     _exit_state: Optional[Path] = None
     """The state the last saving exit confirmed, or None until one has since the last launch."""
@@ -1636,11 +1690,11 @@ class Rpcs3(Emulator):
         holds states that may not have been archived yet (a crashed session,
         a title mid-restore for a different game), and none of them can
         outrank this session's states anyway because every lookup is already
-        scoped to SSTATE_ROOT/<title id>. A boot target whose title id the
-        path alone cannot supply (a bare .iso, an archive) therefore clears
-        nothing rather than guessing. Flipping _restoring here, not just in
-        prepare_restore(), matters because api.py reads save_subtrees for the
-        restore extract before it ever calls prepare_restore().
+        scoped to SSTATE_ROOT/<title id>. A boot target that carries no
+        title id (an archive, an .iso with no readable PARAM.SFO) therefore
+        clears nothing rather than guessing. Flipping _restoring here, not
+        just in prepare_restore(), matters because api.py reads save_subtrees
+        for the restore extract before it ever calls prepare_restore().
 
         Args:
             excluded: Subtrees carried by the whole-card routes. RPCS3 names no
@@ -1957,19 +2011,10 @@ class Rpcs3(Emulator):
         else:
             boot = rom_path
 
-        # Save dirs (and now states) are named with the title serial as
-        # prefix; remember it so the exit dump can be scoped to this title.
-        # Installed titles boot from game/<serial>/USRDIR/EBOOT.BIN, disc
-        # rips carry a PARAM.SFO next to USRDIR. An .iso has no readable
-        # serial from the path alone; the boot watchdog fills it in from
-        # PINE once the game is confirmed running.
-        if boot.name.upper().startswith("EBOOT"):
-            if boot.is_relative_to(GAME_DIR):
-                self._session_serial = boot.parent.parent.name
-            else:
-                self._session_serial = _sfo_title_id(boot.parent.parent / "PARAM.SFO")
-        else:
-            self._session_serial = None
+        # Save dirs and states are named with the title serial as prefix;
+        # remember it so the exit dump can be scoped to this title. A target
+        # that carries none leaves it to the boot watchdog's PINE lookup.
+        self._session_serial = _rom_title_id(boot)
 
         if self._session_serial and self._leftover_snapshot is not None:
             _clear_leftover_states(self._session_serial, self._leftover_snapshot)
@@ -2008,7 +2053,7 @@ class Rpcs3(Emulator):
         """Confirm the launched game reaches a running state via PINE.
 
         Also opportunistically resolves the title id via MsgID for boots
-        that had no serial from the file path alone (a bare .iso).
+        whose target carried none (an .iso with no readable PARAM.SFO).
 
         A process still alive when the deadline passes without ever
         reporting running is the boot-error-dialog case: RPCS3 does not exit
@@ -2030,11 +2075,8 @@ class Rpcs3(Emulator):
                         )
                         return
                     if title:
-                        self._session_serial = title
+                        self._adopt_title_id(title)
                         log.info("boot watchdog: resolved title id %s via PINE", title)
-                        if self._leftover_snapshot is not None:
-                            _clear_leftover_states(title, self._leftover_snapshot)
-                            self._leftover_snapshot = None
                 else:
                     log.debug(
                         "boot watchdog: %s confirmed running via PINE", self._session_serial
@@ -2052,6 +2094,13 @@ class Rpcs3(Emulator):
             )
         else:
             log.warning("boot watchdog: rpcs3 exited before ever reporting running")
+
+    def _adopt_title_id(self, title: str) -> None:
+        """Scope the session to `title` and finish the leftover-state clear it deferred."""
+        self._session_serial = title
+        if self._leftover_snapshot is not None:
+            _clear_leftover_states(title, self._leftover_snapshot)
+            self._leftover_snapshot = None
 
     def _save_exit_state(self) -> Optional[dict]:
         """Send the save-state hotkey and wait for its state and the reboot after it.
@@ -2094,6 +2143,13 @@ class Rpcs3(Emulator):
             A dict with `state_saved`, `state_slot`, and `state_file` (path,
             size, and mtime of the new state file, or None if none was saved).
         """
+        if not self._session_serial and self.alive():
+            # A first boot's PPU compile can outlast the boot watchdog, which
+            # then never names a title the boot target did not carry.
+            title = _pine_title_id()
+            if title:
+                self._adopt_title_id(title)
+                log.info("save-and-exit: resolved title id %s via PINE", title)
         state_file = self._save_exit_state() if slot is not None and self.alive() else None
 
         # The dump ships files newer than the session baseline. A save is a

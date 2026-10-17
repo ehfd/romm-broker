@@ -405,10 +405,15 @@ is an exit-time save. Sending RPCS3 its own save-state hotkey
 by default) stops the game to write the state and then reboots it from that
 state, so a save always interrupts play. The broker sends that hotkey on
 exit, waits for the state file to finish writing and for the reboot to load
-it, then stops RPCS3. A resume works by pointing the next launch straight at
-the newest saved state instead of the game itself: RPCS3 recognises a save state
-passed as its boot target by the file's extension and header, so
-booting into one works the same way booting a ROM does. States are kept one
+it, then stops RPCS3. The state is filed under the game's title id, which
+the broker reads from the game's `PARAM.SFO`, inside the image for a
+decrypted `.iso`. A rom without one gives its id up only once it runs: the
+broker asks RPCS3 for it at boot, and again at exit when a first boot's PPU
+compile outlasted [`RPCS3_BOOT_WAIT`](/docs/configuration/emulators#rpcs3).
+A resume works by pointing the next launch straight at the newest saved
+state instead of the game itself: RPCS3 recognises a save state passed as
+its boot target by the file's extension and header, so booting into one
+works the same way booting a ROM does. States are kept one
 per title, so `resume_slot` always finds the right one. The state an exit
 confirms is served through the state-file GET until the next activate, the
 same way DuckStation's is. The game's own save
@@ -418,7 +423,7 @@ A [declared import](/docs/api/imports#what-each-emulator-takes) can bring in
 PS3 save folders, each with its `PARAM.SFO`, or one savestate, which needs
 `resume_slot` and which the game boots straight into. The savestate has to
 belong to the game being launched, and a rom the broker can read no title id
-from, a bare `.iso`, takes none.
+from, such as an `.iso` without a readable `PARAM.SFO`, takes none.
 
 `rom.path` can be a PKG file, which the launcher installs first
 ([`RPCS3_INSTALL_TIMEOUT`](/docs/configuration/emulators#rpcs3) limits how

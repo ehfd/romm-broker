@@ -386,10 +386,10 @@ savestates folder:
   that case, alone or in one folder named for the game's serial. It is renamed
   `<serial>_import.SAVESTAT` and filed under the serial the launch will look
   in. The serial is the one the boot target holds; RomM's `title_id` is not
-  used. A boot target with none, a bare `.iso`, refuses a state as
-  `identity_unknown`, and a folder named for another serial is
-  `identity_mismatch`. An empty state is `incomplete_unit`, and a RetroArch
-  state is `source_incompatible`.
+  used. A boot target with none, such as an `.iso` without a readable
+  `PS3_GAME/PARAM.SFO`, refuses a state as `identity_unknown`, and a folder
+  named for another serial is `identity_mismatch`. An empty state is
+  `incomplete_unit`, and a RetroArch state is `source_incompatible`.
 
 **ScummVM** names every save after a target, the name `scummvm --add`
 registers a game folder under in `scummvm.ini`, and keeps saves and states in

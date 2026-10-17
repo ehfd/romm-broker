@@ -89,6 +89,57 @@ def _write_pkg(path: Path, title_id: str) -> Path:
     return path
 
 
+def _sfo(title_id: str) -> bytes:
+    """Build a PARAM.SFO holding only a TITLE_ID entry."""
+    key = b"TITLE_ID\0\0\0\0"
+    value = title_id.encode("ascii") + b"\0"
+    value += b"\0" * (-len(value) % 4)
+    key_start = 0x14 + 16
+    data_start = key_start + len(key)
+    header = b"\x00PSF" + struct.pack("<IIII", 0x0101, key_start, data_start, 1)
+    entry = struct.pack("<HHIII", 0, 0x0204, len(value), len(value), 0)
+    return header + entry + key + value
+
+
+def _iso_record(name: bytes, extent: int, size: int, is_dir: bool) -> bytes:
+    """Build one ISO9660 directory record."""
+    length = 33 + len(name) + (len(name) + 1) % 2
+    rec = bytearray(length)
+    rec[0] = length
+    rec[2:10] = struct.pack("<I", extent) + struct.pack(">I", extent)
+    rec[10:18] = struct.pack("<I", size) + struct.pack(">I", size)
+    rec[25] = 2 if is_dir else 0
+    rec[32] = len(name)
+    rec[33 : 33 + len(name)] = name
+    return bytes(rec)
+
+
+def _write_iso(path: Path, title_id: str, game_dir: bytes = b"PS3_GAME") -> Path:
+    """Write a decrypted PS3 disc image whose PS3_GAME/PARAM.SFO carries `title_id`.
+
+    Only the ISO9660 tree down to PARAM.SFO is real: the volume descriptor at
+    sector 16, the root at 18, `game_dir` at 19 and the SFO at 20.
+    """
+    sector = 2048
+    sfo = _sfo(title_id)
+    image = bytearray(21 * sector)
+    pvd = bytearray(sector)
+    pvd[0:7] = b"\x01CD001\x01"
+    pvd[156:190] = _iso_record(b"\0", 18, sector, True)
+    image[16 * sector : 17 * sector] = pvd
+    image[17 * sector : 17 * sector + 7] = b"\xffCD001\x01"
+    root = _iso_record(b"\0", 18, sector, True) + _iso_record(b"\1", 18, sector, True)
+    root += _iso_record(b"PS3_DISC.SFB;1", 20, 0, False) + _iso_record(game_dir, 19, sector, True)
+    image[18 * sector : 18 * sector + len(root)] = root
+    game = _iso_record(b"\0", 19, sector, True) + _iso_record(b"\1", 18, sector, True)
+    game += _iso_record(b"PARAM.SFO;1", 20, len(sfo), False)
+    image[19 * sector : 19 * sector + len(game)] = game
+    image[20 * sector : 20 * sector + len(sfo)] = sfo
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(bytes(image))
+    return path
+
+
 # -- config.yml / ipc.yml patching --
 
 
@@ -236,7 +287,7 @@ def test_clearing_the_working_slot_spares_every_other_titles_state(
 def test_clearing_the_working_slot_keeps_states_when_the_title_is_unknown(
     rpcs3_dirs: dict[str, Path], tmp_path: Path
 ) -> None:
-    """A bare .iso names no title, so the clear has nothing to scope to."""
+    """An .iso with no readable PARAM.SFO names no title, so the clear has nothing to scope to."""
     kept = _touch(rpcs3_dirs["sstate_root"] / "BLUS30443" / "BLUS30443_1.SAVESTAT")
     iso = tmp_path / "roms" / "game.iso"
     iso.parent.mkdir(parents=True)
@@ -247,6 +298,23 @@ def test_clearing_the_working_slot_keeps_states_when_the_title_is_unknown(
     emu.clear_working_slot()
 
     assert kept.exists()
+
+
+def test_clearing_the_working_slot_scopes_to_the_title_an_iso_carries(
+    rpcs3_dirs: dict[str, Path], tmp_path: Path
+) -> None:
+    """A disc image's PARAM.SFO names its title, so its stale state goes and no clear is deferred."""
+    stale = _touch(rpcs3_dirs["sstate_root"] / "BLUS30443" / "BLUS30443_1.SAVESTAT")
+    other_title = _touch(rpcs3_dirs["sstate_root"] / "OTHER0000" / "OTHER0000_1.SAVESTAT")
+    iso = _write_iso(tmp_path / "roms" / "game.iso", "BLUS30443")
+
+    emu = rpcs3.Rpcs3()
+    emu.resolve_rom_file(iso)
+    emu.clear_working_slot()
+
+    assert not stale.exists()
+    assert other_title.exists()
+    assert emu._leftover_snapshot is None
 
 
 def test_clearing_the_working_slot_keeps_states_without_a_resolved_rom(
@@ -961,6 +1029,65 @@ def test_launch_boots_the_state_file_when_a_resume_is_found(
     assert spawned["cmd"][-1] == str(state)
 
 
+def test_launch_resumes_the_state_of_the_title_an_iso_carries(
+    rpcs3_dirs: dict[str, Path],
+    no_boot_watchdog: list[tuple[str, tuple]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disc image names its title at launch, so a resume boots its newest state."""
+    monkeypatch.setattr(rpcs3, "_patch_config", lambda: None)
+    monkeypatch.setattr(rpcs3, "_patch_ipc", lambda: None)
+    spawned = {}
+    monkeypatch.setattr(
+        rpcs3.Rpcs3, "_spawn", lambda self, cmd, env: spawned.setdefault("cmd", cmd)
+    )
+    iso = _write_iso(rpcs3_dirs["rom_root"] / "Game.iso", "BLUS30443")
+    state = _touch(rpcs3_dirs["sstate_root"] / "BLUS30443" / "BLUS30443_3.SAVESTAT")
+
+    emu = rpcs3.Rpcs3()
+    emu.launch(iso, 1)
+
+    assert spawned["cmd"][-1] == str(state)
+    assert emu._session_serial == "BLUS30443"
+
+
+def test_rom_title_id_reads_an_isos_param_sfo(tmp_path: Path) -> None:
+    """The title id comes from PS3_GAME/PARAM.SFO inside the image's ISO9660 tree."""
+    iso = _write_iso(tmp_path / "Game.ISO", "BLUS30443")
+
+    assert rpcs3._rom_title_id(iso) == "BLUS30443"
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        pytest.param(b"iso", id="too-short"),
+        pytest.param(b"\0" * 40960, id="no-volume-descriptor"),
+        pytest.param(None, id="no-PS3_GAME"),
+        pytest.param(b"truncated", id="truncated-tree"),
+    ],
+)
+def test_rom_title_id_answers_none_for_an_iso_it_cannot_read(
+    tmp_path: Path, image: Optional[bytes]
+) -> None:
+    """An image without a readable PS3_GAME/PARAM.SFO carries no title id.
+
+    Args:
+        tmp_path: Pytest's temporary directory.
+        image: The image's bytes; None for a tree whose game folder is misnamed,
+            `b"truncated"` for a real image cut off inside its root directory.
+    """
+    iso = tmp_path / "Game.iso"
+    if image is None:
+        _write_iso(iso, "BLUS30443", game_dir=b"PS3_DATA")
+    elif image == b"truncated":
+        iso.write_bytes(_write_iso(iso, "BLUS30443").read_bytes()[: 18 * 2048 + 40])
+    else:
+        iso.write_bytes(image)
+
+    assert rpcs3._rom_title_id(iso) is None
+
+
 def test_launch_falls_back_to_a_fresh_boot_with_no_resume_state(
     rpcs3_dirs: dict[str, Path], no_boot_watchdog: list[tuple[str, tuple]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1250,12 +1377,87 @@ def test_exit_with_a_slot_but_no_known_serial_saves_nothing(
     """Exit with a slot but no known serial saves nothing."""
     emu = rpcs3.Rpcs3()
     monkeypatch.setattr(rpcs3.Rpcs3, "alive", lambda self: True)
+    monkeypatch.setattr(rpcs3, "_pine_title_id", lambda: None)
     emu._session_serial = None
     emu._send_key = lambda key: pytest.fail("hotkey sent with no known title id")
 
     report = emu.save_and_exit(1)
 
     assert report == {"state_saved": False, "state_slot": 1, "state_file": None}
+
+
+def test_exit_resolves_a_title_the_boot_watchdog_never_learned(
+    rpcs3_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An .iso whose first-boot compile outlasted the watchdog still saves a state at exit."""
+    emu = rpcs3.Rpcs3()
+    monkeypatch.setattr(rpcs3.Rpcs3, "alive", lambda self: True)
+    monkeypatch.setattr(rpcs3, "_pine_title_id", lambda: "BLUS30443")
+    emu._session_serial = None
+    written = rpcs3_dirs["sstate_root"] / "BLUS30443" / "BLUS30443_1.SAVESTAT"
+
+    def fake_send_key(key: str) -> bool:
+        _touch(written)
+        return True
+
+    emu._send_key = fake_send_key
+
+    report = emu.save_and_exit(1)
+
+    assert emu._session_serial == "BLUS30443"
+    assert report["state_saved"] is True
+    assert report["state_file"]["path"] == str(written)
+
+
+def test_exit_restamps_the_save_dirs_of_a_title_resolved_at_exit(
+    rpcs3_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The resolved title scopes the restamp too, so its untouched save files still ship."""
+    emu = rpcs3.Rpcs3()
+    monkeypatch.setattr(rpcs3.Rpcs3, "alive", lambda self: True)
+    monkeypatch.setattr(rpcs3, "_pine_title_id", lambda: "BLUS30443")
+    emu._session_serial = None
+    emu._session_start = time.time()
+    old = _touch(
+        rpcs3_dirs["user_home"] / "savedata" / "BLUS30443-SAVE00" / "SYS-DATA",
+        mtime=emu._session_start - 3600,
+    )
+
+    emu.save_and_exit(None)
+
+    assert old.stat().st_mtime >= emu._session_start
+
+
+def test_exit_finishes_the_deferred_leftover_clear_for_a_title_resolved_at_exit(
+    rpcs3_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale state the activate-time clear could not scope is dropped once PINE names the title."""
+    emu = rpcs3.Rpcs3()
+    monkeypatch.setattr(rpcs3.Rpcs3, "alive", lambda self: True)
+    monkeypatch.setattr(rpcs3, "_pine_title_id", lambda: "BLUS30443")
+    stale = _touch(rpcs3_dirs["sstate_root"] / "BLUS30443" / "BLUS30443_1.SAVESTAT")
+    emu._session_serial = None
+    emu._leftover_snapshot = rpcs3._state_snapshot("BLUS30443")
+
+    emu.save_and_exit(None)
+
+    assert not stale.exists()
+    assert emu._leftover_snapshot is None
+
+
+def test_exit_asks_pine_only_when_the_title_is_unknown_and_rpcs3_is_alive(
+    rpcs3_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A known title, or a dead process, never waits on the PINE socket."""
+    emu = rpcs3.Rpcs3()
+    monkeypatch.setattr(rpcs3, "_pine_title_id", lambda: pytest.fail("PINE asked needlessly"))
+    monkeypatch.setattr(rpcs3.Rpcs3, "alive", lambda self: False)
+    emu._session_serial = None
+    emu.save_and_exit(None)
+
+    monkeypatch.setattr(rpcs3.Rpcs3, "alive", lambda self: True)
+    emu._session_serial = "BLUS30443"
+    emu.save_and_exit(None)
 
 
 def test_exit_reports_the_state_the_hotkey_wrote(
@@ -3262,7 +3464,7 @@ def test_a_state_in_another_titles_folder_is_refused(booted: dict[str, Path]) ->
 
 
 def test_a_state_needs_the_id_the_boot_target_carries(rpcs3_dirs: dict[str, Path]) -> None:
-    """A bare disc image or an archive gives no id, and no folder to file a state under.
+    """A disc image without a readable PARAM.SFO gives no id, and no folder to file a state under.
 
     Args:
         rpcs3_dirs: The patched RPCS3 layout.
@@ -3278,6 +3480,20 @@ def test_a_state_needs_the_id_the_boot_target_carries(rpcs3_dirs: dict[str, Path
 
     assert _refused(from_iso) == [("identity_unknown", member)]
     assert _refused(without_rom) == [("identity_unknown", member)]
+
+
+def test_a_state_files_under_the_title_an_iso_carries(rpcs3_dirs: dict[str, Path]) -> None:
+    """A disc image's PARAM.SFO gives the id a state is filed under.
+
+    Args:
+        rpcs3_dirs: The patched RPCS3 layout.
+    """
+    iso = _write_iso(rpcs3_dirs["rom_root"] / "Game.iso", _SERIAL)
+
+    result = _preflight(rpcs3_dirs, {f".import/state/{_SERIAL}_1.SAVESTAT": b"progress"}, rom_file=iso)
+
+    assert result.refusals == ()
+    assert [p.dest for p in result.placements] == [PurePosixPath(_STATE_DEST)]
 
 
 def test_romms_id_does_not_stand_in_for_a_state_the_target_lacks(
