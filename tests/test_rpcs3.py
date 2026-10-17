@@ -761,13 +761,49 @@ def test_holds_open_is_false_without_a_process_handle(tmp_path: Path) -> None:
 
 @needs_procfs
 def test_holds_open_sees_a_descriptor_the_test_process_itself_holds(tmp_path: Path) -> None:
-    """An open descriptor on the state file reads as a write still in flight."""
+    """A writable descriptor on the state file reads as a write still in flight."""
+    target = tmp_path / "BLUS30443_1.SAVESTAT"
+    target.write_bytes(b"state")
+
+    with target.open("r+b"):
+        assert rpcs3._holds_open(os.getpid(), target) is True
+    assert rpcs3._holds_open(os.getpid(), target) is False
+
+
+@needs_procfs
+def test_holds_open_ignores_a_read_only_descriptor(tmp_path: Path) -> None:
+    """The hotkey's reboot reading the new state back is not a write.
+
+    Counting it would hold the settle until STATE_WAIT ran out and report
+    no save for a state that finished writing.
+    """
     target = tmp_path / "BLUS30443_1.SAVESTAT"
     target.write_bytes(b"state")
 
     with target.open("rb"):
+        assert rpcs3._holds_open(os.getpid(), target) is False
+    with target.open("ab"):
         assert rpcs3._holds_open(os.getpid(), target) is True
-    assert rpcs3._holds_open(os.getpid(), target) is False
+
+
+@needs_procfs
+def test_holds_open_counts_a_descriptor_of_unknown_mode_as_a_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An fdinfo that can't be read must not let a write in flight settle early."""
+    target = tmp_path / "BLUS30443_1.SAVESTAT"
+    target.write_bytes(b"state")
+    real_read_text = Path.read_text
+
+    def deny_fdinfo(self: Path, *args: object, **kwargs: object) -> str:
+        if "/fdinfo/" in str(self):
+            raise PermissionError("denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", deny_fdinfo)
+
+    with target.open("rb"):
+        assert rpcs3._holds_open(os.getpid(), target) is True
 
 
 @needs_procfs
@@ -776,7 +812,7 @@ def test_holds_open_sees_a_descriptor_held_by_a_child_of_the_leader(tmp_path: Pa
     target = tmp_path / "BLUS30443_1.SAVESTAT"
     target.write_bytes(b"state")
     quoted = shlex.quote(str(target))
-    proc = _run_in_own_session(f"sh -c 'exec 3<{quoted}; sleep 30' & wait")
+    proc = _run_in_own_session(f"sh -c 'exec 3>>{quoted}; sleep 30' & wait")
     try:
         assert _wait_until(lambda: rpcs3._holds_open(proc.pid, target))
         # The leader never opened the file, so only the group scan can see the write.
@@ -796,7 +832,7 @@ def test_holds_open_resolves_the_state_file_through_a_symlink(tmp_path: Path) ->
     link = tmp_path / "link"
     link.symlink_to(real, target_is_directory=True)
 
-    with target.open("rb"):
+    with target.open("r+b"):
         assert rpcs3._holds_open(os.getpid(), link / target.name) is True
 
 
@@ -1288,6 +1324,31 @@ def test_exit_reports_the_state_the_hotkey_wrote(
     assert report["state_saved"] is True
     assert report["state_slot"] == 1
     assert report["state_file"]["path"] == str(written)
+
+
+def test_exit_sends_rpcs3s_savestate_shortcut_by_default(
+    rpcs3_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exit hotkey is gw_savestate's ctrl+s, not a gw_savestate_N slot key.
+
+    ctrl+alt+1..4 boot the game from a saved slot and write nothing, so an
+    exit sending one of those waits out STATE_WAIT and reports no save.
+    """
+    emu = rpcs3.Rpcs3()
+    emu._session_serial = "BLUS30443"
+    monkeypatch.setattr(rpcs3.Rpcs3, "alive", lambda self: True)
+    sent: list[str] = []
+
+    def fake_send_key(key: str) -> bool:
+        sent.append(key)
+        _touch(rpcs3_dirs["sstate_root"] / "BLUS30443" / "BLUS30443_1.SAVESTAT")
+        return True
+
+    emu._send_key = fake_send_key
+
+    emu.save_and_exit(1)
+
+    assert sent == ["ctrl+s"]
 
 
 def test_exit_reports_no_save_when_the_hotkey_fails_to_send(
@@ -1858,11 +1919,11 @@ def test_send_key_activates_then_sends_the_key(rpcs3_dirs: dict[str, Path]) -> N
     calls: list[tuple] = []
     emu._xdotool = _fake_xdotool(calls, "111\n", {"111": str(os.getpid())})
 
-    assert emu._send_key("ctrl+alt+1") is True
+    assert emu._send_key("ctrl+s") is True
     assert calls[0] == ("search", "--class", rpcs3._WINDOW_CLASS)
     assert calls[1] == ("getwindowpid", "111")
     assert calls[2][0] == "windowactivate"
-    assert calls[3] == ("key", "--clearmodifiers", "ctrl+alt+1")
+    assert calls[3] == ("key", "--clearmodifiers", "ctrl+s")
 
 
 def test_send_key_fails_with_no_window(rpcs3_dirs: dict[str, Path]) -> None:
@@ -1870,7 +1931,7 @@ def test_send_key_fails_with_no_window(rpcs3_dirs: dict[str, Path]) -> None:
     emu = rpcs3.Rpcs3()
     emu._xdotool = lambda *args: None
 
-    assert emu._send_key("ctrl+alt+1") is False
+    assert emu._send_key("ctrl+s") is False
 
 
 def test_game_window_picks_the_window_owned_by_this_launch(

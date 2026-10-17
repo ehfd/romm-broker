@@ -169,12 +169,13 @@ _XDOTOOL = os.environ.get("XDOTOOL_BIN", "xdotool")
 # once a game is running - no title filtering needed the way PPSSPP's shared
 # menu/game class needs.
 _WINDOW_CLASS = "rpcs3"
-# Default binding for gw_savestate_1 (rpcs3qt/shortcut_settings.cpp). RPCS3
-# has four such shortcuts, but every one just writes a new auto-numbered
-# state (rpcs3/Emu/savestate_utils.cpp), so slot 1 is as good as any other.
-# Configurable because it's a GUI-rebindable shortcut, unlike the rest of
-# this module's constants.
-_SAVE_STATE_KEY = os.environ.get("RPCS3_SAVE_STATE_KEY", "ctrl+alt+1")
+# Default binding for gw_savestate (rpcs3qt/shortcut_settings.cpp), the one
+# shortcut that writes a state (Emu.Kill(false, true) in gs_frame.cpp). The
+# Alt+Ctrl+1..4 shortcuts next to it are gw_savestate_1..4, which since
+# RPCS3's multi-slot savestates boot the game from that slot instead of
+# saving one. Configurable because it's a GUI-rebindable shortcut, unlike the
+# rest of this module's constants.
+_SAVE_STATE_KEY = os.environ.get("RPCS3_SAVE_STATE_KEY", "ctrl+s")
 
 
 def _rpcs3_bin() -> str:
@@ -1158,29 +1159,52 @@ def _launch_pids(pid: Optional[int]) -> list[int]:
     return found or [pid]
 
 
+def _opened_for_writing(fd: Path) -> bool:
+    """Tell whether descriptor `fd` (a `/proc/<pid>/fd` entry) can write.
+
+    Args:
+        fd: The descriptor's `/proc/<pid>/fd/<n>` path.
+
+    Returns:
+        True when its open flags carry O_WRONLY or O_RDWR, or when
+        `/proc/<pid>/fdinfo` can't be read: an unknown mode counts as a
+        writer, the way every descriptor did before the mode was checked.
+    """
+    try:
+        for line in Path(f"{fd.parent.parent}/fdinfo/{fd.name}").read_text().splitlines():
+            if line.startswith("flags:"):
+                return (int(line.split()[1], 8) & os.O_ACCMODE) != os.O_RDONLY
+    except (OSError, ValueError, IndexError) as exc:
+        log.debug("rpcs3: could not read the open mode of fd %s: %s", fd, exc)
+    return True
+
+
 def _holds_open(pid: Optional[int], path: Path) -> bool:
-    """Tell whether the launch `pid` leads still has `path` open.
+    """Tell whether the launch `pid` leads still has `path` open for writing.
 
     A file the writer has not closed yet is a write still in flight, however
     long its size happens to sit still: RPCS3 compresses a state as it writes
     it, and a busy or stalled host can leave the file the same size for a
-    full poll window mid-write.
+    full poll window mid-write. A read-only descriptor doesn't count: the
+    save-state hotkey reboots the game into the state it just wrote, and
+    that boot reading the file back is not a write.
 
     Args:
         pid: The emulator process, or None when the broker holds no handle on it.
         path: The state file being watched.
 
     Returns:
-        True only when the descriptor is confirmed open. No pid, a `/proc`
-        that cannot be read, and a process already gone all read as False, so
-        the size test stays the answer where this one cannot contribute.
+        True only when a writable descriptor is confirmed open. No pid, a
+        `/proc` that cannot be read, and a process already gone all read as
+        False, so the size test stays the answer where this one cannot
+        contribute.
     """
     target = os.path.realpath(path)
     for candidate in _launch_pids(pid):
         try:
             for fd in Path(f"/proc/{candidate}/fd").iterdir():
                 try:
-                    if os.path.realpath(fd) == target:
+                    if os.path.realpath(fd) == target and _opened_for_writing(fd):
                         return True
                 except OSError as exc:
                     log.debug("rpcs3: could not resolve fd %s of pid %s: %s", fd, candidate, exc)

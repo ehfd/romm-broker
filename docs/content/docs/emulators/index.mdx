@@ -401,10 +401,11 @@ PS4 save folders. They are placed under the default user, whoever made them.
 Like DuckStation and Flycast, RPCS3 has no live save states: nothing here
 lets a game be saved or loaded while it keeps running. What it has instead
 is an exit-time save. Sending RPCS3 its own save-state hotkey
-([`RPCS3_SAVE_STATE_KEY`](/docs/configuration/emulators#rpcs3), `ctrl+alt+1`
-by default) always closes the game once the state finishes writing, so the
-broker triggers that hotkey and waits for the process to end rather than
-keeping it open. A resume works by pointing the next launch straight at the
+([`RPCS3_SAVE_STATE_KEY`](/docs/configuration/emulators#rpcs3), `ctrl+s`
+by default) stops the game to write the state and then reboots it from that
+state, so the game can't keep running past a save. The broker sends that
+hotkey on exit, waits for the state file to finish writing, then stops
+RPCS3. A resume works by pointing the next launch straight at the
 newest saved state instead of the game itself: RPCS3 tells a save state
 apart from a normal boot target by its file contents, not its extension, so
 booting into one works the same way booting a ROM does. States are kept one
