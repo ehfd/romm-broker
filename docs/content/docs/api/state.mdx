@@ -124,17 +124,18 @@ curl -X GET http://localhost:3000/streaming/api/session/state-screenshot \
 
 This route is what gives a stored state its thumbnail in RomM's resume
 picker. The image is a screenshot of the streamed desktop, taken the moment
-the save was sent. The save-state and exit routes grab it over the pixelflux
-computer-use endpoint (a local screenshot API that Selkies, the video
-streaming piece, exposes on `127.0.0.1:5000`) right before the emulator is
-told to save. The broker then shrinks the image so its longest side is
-`BROKER_STATE_SCREENSHOT_SIZE` pixels, and only keeps it once the state
-itself is confirmed saved. This works the same way for every emulator, so it
-never depends on whatever screenshot feature, if any, the emulator itself
-has. Like the state file, it stays readable after the session has exited. A
-`404` response means the state has no picture, either because the capture
-failed or because the container is running without `PIXELFLUX_CU` set.
-Either way, RomM still files the state, just without a thumbnail.
+the save was sent. The save-state and exit routes grab it from the Selkies
+screenshot API (`GET <SELKIES_CONTROL_URL>/api/screenshot`, the same control
+plane the token pushes go to, authorized with `SELKIES_MASTER_TOKEN`) right
+before the emulator is told to save. The broker then shrinks the image so its
+longest side is `BROKER_STATE_SCREENSHOT_SIZE` pixels, and only keeps it once
+the state itself is confirmed saved. This works the same way for every
+emulator, so it never depends on whatever screenshot feature, if any, the
+emulator itself has. Like the state file, it stays readable after the session
+has exited. A `404` response means the state has no picture, either because
+the capture failed or because the Selkies build in the container has no
+screenshot support. Either way, RomM still files the state, just without a
+thumbnail.
 
 ## Resume after activate
 

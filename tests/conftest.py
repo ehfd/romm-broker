@@ -323,7 +323,7 @@ def clean_session() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def no_frame_capture(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stub the frame capture so a save never reaches for a computer-use endpoint.
+    """Stub the frame capture so a save never reaches for a selkies screenshot endpoint.
 
     A test that wants a frame patches `screenshot.capture_frame` itself.
 

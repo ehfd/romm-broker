@@ -121,7 +121,7 @@ webstation_broker/       FastAPI app (pip installable, console script webstation
   saves.py               save archive restore on activate, delta dump on exit
   memcard.py             whole memory card capture and hydrate
   imports.py             declared save/state/card imports, placed or refused per emulator in preflight
-  screenshot.py          save-state thumbnail capture over the pixelflux computer-use endpoint
+  screenshot.py          save-state thumbnail capture over the selkies screenshot API
   callback.py            exit-time save archive upload to the parent
   settings.py            environment-driven configuration
   main.py                console-script entrypoint; refuses to start without BROKER_SECRET or dev mode
