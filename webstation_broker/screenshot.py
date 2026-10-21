@@ -1,13 +1,13 @@
-"""Save-state frame capture over the pixelflux computer-use endpoint.
+"""Save-state frame capture over the selkies screenshot API.
 
-Selkies serves the Anthropic Computer Use HTTP spec on a loopback port when
-`PIXELFLUX_CU` names one, and its `screenshot` action answers with the whole
-framebuffer as a base64 PNG. The broker shares the container, so the port is
-fixed rather than configured. The frame is scaled down here to the thumbnail
-RomM files beside a state.
+Selkies answers `GET /api/screenshot` with a PNG of the primary display, the
+cursor drawn in, taken by pixelflux from the live capture. The route is on
+the same server as the token endpoint, so it is reached through the same
+candidate bases (`SELKIES_SCREENSHOT_URLS`) with the same master token, and
+the base that last answered is tried first. The frame is scaled down here to
+the thumbnail RomM files beside a state.
 """
 
-import base64
 import io
 import logging
 from typing import Optional
@@ -19,11 +19,24 @@ from . import settings
 
 log = logging.getLogger(__name__)
 
-CU_URL = "http://127.0.0.1:5000/computer-use"
-"""The computer-use endpoint selkies binds inside the container."""
-
-CU_TIMEOUT = 5.0
+SCREENSHOT_TIMEOUT = 5.0
 """Seconds a screenshot request gets; on Wayland it forces a one-frame GPU readback."""
+
+_active_url: Optional[str] = None
+"""Endpoint that last answered with a frame, tried first on the next capture."""
+
+
+def _screenshot_urls() -> list[str]:
+    """Return the candidate screenshot endpoints, last-known-good first.
+
+    Returns:
+        The configured endpoints, with `_active_url` moved to the front when it
+        is one of them.
+    """
+    urls = settings.SELKIES_SCREENSHOT_URLS
+    if _active_url in urls:
+        return [_active_url] + [u for u in urls if u != _active_url]
+    return list(urls)
 
 
 def capture_frame() -> Optional[bytes]:
@@ -34,17 +47,23 @@ def capture_frame() -> Optional[bytes]:
 
     Returns:
         PNG bytes bounded to `STATE_SCREENSHOT_SIZE` on the longest side, or
-        None when the endpoint is unreachable or answers with anything that
-        does not decode as an image.
+        None when no endpoint is reachable or every one answers with anything
+        that does not decode as an image.
     """
-    try:
-        response = httpx.post(CU_URL, json={"action": "screenshot"}, timeout=CU_TIMEOUT)
-        response.raise_for_status()
-        raw = base64.b64decode(response.json()["data"], validate=True)
-    except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
-        log.warning("state frame capture failed: %s", exc)
-        return None
-    return _thumbnail(raw)
+    global _active_url
+    headers = {"Authorization": f"Bearer {settings.SELKIES_MASTER_TOKEN}"}
+    for url in _screenshot_urls():
+        try:
+            response = httpx.get(url, headers=headers, timeout=SCREENSHOT_TIMEOUT)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            log.warning("state frame capture failed at %s: %s", url, exc)
+            continue
+        frame = _thumbnail(response.content)
+        if frame is not None:
+            _active_url = url
+            return frame
+    return None
 
 
 def _thumbnail(raw: bytes) -> Optional[bytes]:

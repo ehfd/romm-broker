@@ -41,8 +41,8 @@ in the logs.
 
 | Env var | Set by | Purpose |
 | --- | --- | --- |
-| `SELKIES_CONTROL_URL` | `init-romm-config` | The base URL of the selkies (the video/input streaming layer) control plane, `http://127.0.0.1:<CUSTOM_WS_PORT><SUBFOLDER>stream`. The broker sends its token maps to `<url>/api/tokens`, falling back to `<url>/tokens`. If this is unset, it tries `127.0.0.1:8082` and `8083` directly instead. |
-| `SELKIES_MASTER_TOKEN` | `init-romm-config` | The bearer token (an access key sent with each request) for those token pushes. Generated fresh each boot if none is supplied. |
+| `SELKIES_CONTROL_URL` | `init-romm-config` | The base URL of the selkies (the video/input streaming layer) control plane, `http://127.0.0.1:<CUSTOM_WS_PORT><SUBFOLDER>stream`. The broker sends its token maps to `<url>/api/tokens`, falling back to `<url>/tokens`, and fetches save-state thumbnails from `<url>/api/screenshot`. If this is unset, it tries `127.0.0.1:8082` and `8083` directly instead. |
+| `SELKIES_MASTER_TOKEN` | `init-romm-config` | The bearer token (an access key sent with each request) for those token pushes and screenshot fetches. Generated fresh each boot if none is supplied. |
 | `XDG_RUNTIME_DIR` | base image | Where PCSX2's PINE socket (the file PCSX2 uses to accept remote commands) is expected, `pcsx2.sock`, under the default `/config/.XDG`. |
 
 ## Paths the launchers share

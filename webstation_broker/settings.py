@@ -58,6 +58,8 @@ _control_url = os.environ.get("SELKIES_CONTROL_URL", "").rstrip("/")
 if _control_url:
     SELKIES_TOKEN_URLS = [f"{_control_url}/api/tokens", f"{_control_url}/tokens"]
     """Candidate selkies token endpoints, both paths under `SELKIES_CONTROL_URL`."""
+    SELKIES_SCREENSHOT_URLS = [f"{_control_url}/api/screenshot"]
+    """The selkies screenshot endpoint under `SELKIES_CONTROL_URL`."""
 else:
     SELKIES_TOKEN_URLS = [
         "http://127.0.0.1:8082/api/tokens",
@@ -68,6 +70,11 @@ else:
     One entry per known selkies image, each on the port and path that image
     answers on.
     """
+    SELKIES_SCREENSHOT_URLS = [
+        "http://127.0.0.1:8082/api/screenshot",
+        "http://127.0.0.1:8083/api/screenshot",
+    ]
+    """Candidate selkies screenshot endpoints when `SELKIES_CONTROL_URL` is unset, one per known image."""
 SELKIES_MASTER_TOKEN = os.environ.get("SELKIES_MASTER_TOKEN", "")
 """Bearer token for the selkies token endpoint, from `SELKIES_MASTER_TOKEN` (default empty)."""
 
