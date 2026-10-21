@@ -1,9 +1,8 @@
 """Capturing the streamed desktop for a state's thumbnail."""
 
-import base64
 import io
-import json
-from typing import Any
+from collections.abc import Iterator
+from typing import Callable
 
 import httpx
 import pytest
@@ -11,10 +10,22 @@ from PIL import Image
 
 from webstation_broker import screenshot, settings
 
+Getter = Callable[..., httpx.Response]
+"""The shape of the `httpx.get` a test stands in for the real one."""
+
 
 @pytest.fixture(autouse=True)
-def no_frame_capture() -> None:
-    """Override the shared stub: these tests drive the real capture against a fake endpoint."""
+def no_frame_capture(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Override the shared stub: these tests drive the real capture against fake endpoints.
+
+    Pins the candidate endpoints and the master token, and clears the
+    last-known-good endpoint on both sides, since it is module-global.
+    """
+    monkeypatch.setattr(settings, "SELKIES_SCREENSHOT_URLS", ["http://a/api/screenshot", "http://b/api/screenshot"])
+    monkeypatch.setattr(settings, "SELKIES_MASTER_TOKEN", "master")
+    monkeypatch.setattr(screenshot, "_active_url", None)
+    yield
+    screenshot._active_url = None
 
 
 def _png(width: int, height: int) -> bytes:
@@ -45,35 +56,40 @@ def _size(png: bytes) -> tuple[int, int]:
         return image.size
 
 
-def _answer(monkeypatch: pytest.MonkeyPatch, body: Any, status: int = 200) -> list[dict[str, Any]]:
-    """Make the computer-use endpoint answer `body`, recording every request.
+def _answer(
+    monkeypatch: pytest.MonkeyPatch, answers: dict[str, tuple[int, bytes]]
+) -> list[tuple[str, dict[str, str]]]:
+    """Make each endpoint answer with a status and body, recording every request.
 
     Args:
         monkeypatch: The pytest monkeypatch fixture.
-        body: The JSON the endpoint answers with.
-        status: The HTTP status it answers with.
+        answers: Endpoint URL to the `(status, body)` it answers with; an
+            endpoint not listed refuses the connection.
 
     Returns:
-        The list every request's `json` payload is appended to.
+        The list every request's `(url, headers)` is appended to.
     """
-    requests: list[dict[str, Any]] = []
+    requests: list[tuple[str, dict[str, str]]] = []
 
-    def post(url: str, json: dict[str, Any], timeout: float) -> httpx.Response:
-        requests.append(json)
-        return httpx.Response(status, json=body, request=httpx.Request("POST", url))
+    def get(url: str, headers: dict[str, str], timeout: float) -> httpx.Response:
+        requests.append((url, headers))
+        if url not in answers:
+            raise httpx.ConnectError("connection refused")
+        status, body = answers[url]
+        return httpx.Response(status, content=body, request=httpx.Request("GET", url))
 
-    monkeypatch.setattr(screenshot.httpx, "post", post)
+    monkeypatch.setattr(screenshot.httpx, "get", get)
     return requests
 
 
 def test_the_frame_is_scaled_to_the_thumbnail_size(monkeypatch: pytest.MonkeyPatch) -> None:
     """A full-size capture comes back bounded on its longest side, aspect kept."""
     monkeypatch.setattr(settings, "STATE_SCREENSHOT_SIZE", 320)
-    requests = _answer(monkeypatch, {"data": base64.b64encode(_png(1024, 768)).decode()})
+    requests = _answer(monkeypatch, {"http://a/api/screenshot": (200, _png(1024, 768))})
 
     frame = screenshot.capture_frame()
 
-    assert requests == [{"action": "screenshot"}]
+    assert requests == [("http://a/api/screenshot", {"Authorization": "Bearer master"})]
     assert frame is not None
     assert frame.startswith(b"\x89PNG")
     assert _size(frame) == (320, 240)
@@ -82,7 +98,7 @@ def test_the_frame_is_scaled_to_the_thumbnail_size(monkeypatch: pytest.MonkeyPat
 def test_a_frame_already_small_enough_is_not_upscaled(monkeypatch: pytest.MonkeyPatch) -> None:
     """The thumbnail size is a ceiling, not a target."""
     monkeypatch.setattr(settings, "STATE_SCREENSHOT_SIZE", 640)
-    _answer(monkeypatch, {"data": base64.b64encode(_png(200, 100)).decode()})
+    _answer(monkeypatch, {"http://a/api/screenshot": (200, _png(200, 100))})
 
     frame = screenshot.capture_frame()
 
@@ -90,60 +106,45 @@ def test_a_frame_already_small_enough_is_not_upscaled(monkeypatch: pytest.Monkey
     assert _size(frame) == (200, 100)
 
 
-def test_an_unreachable_endpoint_yields_no_frame(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A container without the endpoint saves fine, just without a picture."""
+def test_an_unreachable_endpoint_falls_through_to_the_next(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each known image's endpoint is tried in turn, as the token pushes do."""
+    requests = _answer(monkeypatch, {"http://b/api/screenshot": (200, _png(64, 64))})
 
-    def refuse(url: str, json: dict[str, Any], timeout: float) -> httpx.Response:
-        raise httpx.ConnectError("connection refused")
-
-    monkeypatch.setattr(screenshot.httpx, "post", refuse)
-
-    assert screenshot.capture_frame() is None
+    assert screenshot.capture_frame() is not None
+    assert [url for url, _ in requests] == ["http://a/api/screenshot", "http://b/api/screenshot"]
 
 
-def test_an_error_status_yields_no_frame(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An endpoint that refuses the action is treated like one that is not there."""
-    _answer(monkeypatch, {"error": "no backend"}, status=500)
-
-    assert screenshot.capture_frame() is None
-
-
-@pytest.mark.parametrize(
-    "body",
-    [{"text": "X=0,Y=0"}, {"data": "not base64!"}, {"data": base64.b64encode(b"not a png").decode()}],
-)
-def test_an_answer_that_is_not_an_image_yields_no_frame(
-    monkeypatch: pytest.MonkeyPatch, body: dict[str, Any]
-) -> None:
-    """Anything but a decodable image in `data` is dropped rather than served."""
-    _answer(monkeypatch, body)
-
-    assert screenshot.capture_frame() is None
-
-
-def test_a_body_that_is_not_json_yields_no_frame(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A non-JSON answer is dropped the same way."""
-
-    def post(url: str, json: dict[str, Any], timeout: float) -> httpx.Response:
-        return httpx.Response(200, content=b"<html>", request=httpx.Request("POST", url))
-
-    monkeypatch.setattr(screenshot.httpx, "post", post)
-
-    assert screenshot.capture_frame() is None
-
-
-def test_the_request_goes_to_the_loopback_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The broker shares the container with selkies, so the endpoint is the fixed loopback port."""
-    seen: list[str] = []
-
-    def post(url: str, json: dict[str, Any], timeout: float) -> httpx.Response:
-        seen.append(url)
-        return httpx.Response(200, content=json_bytes({"data": ""}), request=httpx.Request("POST", url))
-
-    def json_bytes(payload: dict[str, Any]) -> bytes:
-        return json.dumps(payload).encode()
-
-    monkeypatch.setattr(screenshot.httpx, "post", post)
+def test_the_endpoint_that_answered_is_tried_first_next_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A steady-state capture does not re-probe the other image's endpoint."""
+    requests = _answer(monkeypatch, {"http://b/api/screenshot": (200, _png(64, 64))})
     screenshot.capture_frame()
+    requests.clear()
 
-    assert seen == ["http://127.0.0.1:5000/computer-use"]
+    assert screenshot.capture_frame() is not None
+    assert [url for url, _ in requests] == ["http://b/api/screenshot"]
+
+
+def test_no_reachable_endpoint_yields_no_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A container without the API saves fine, just without a picture."""
+    _answer(monkeypatch, {})
+
+    assert screenshot.capture_frame() is None
+
+
+@pytest.mark.parametrize("status", [401, 404, 501])
+def test_an_error_status_yields_no_frame(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
+    """A refused token, an unknown display, or a build without screenshots reads as an absent endpoint."""
+    _answer(
+        monkeypatch, {"http://a/api/screenshot": (status, b"no"), "http://b/api/screenshot": (status, b"no")}
+    )
+
+    assert screenshot.capture_frame() is None
+
+
+@pytest.mark.parametrize("body", [b"", b"not a png", b"<html>"])
+def test_an_answer_that_is_not_an_image_yields_no_frame(monkeypatch: pytest.MonkeyPatch, body: bytes) -> None:
+    """Anything but a decodable image is dropped rather than served."""
+    _answer(monkeypatch, {"http://a/api/screenshot": (200, body), "http://b/api/screenshot": (200, body)})
+
+    assert screenshot.capture_frame() is None
+
