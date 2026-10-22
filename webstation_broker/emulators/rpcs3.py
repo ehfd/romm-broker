@@ -35,9 +35,9 @@ id lookup (MsgID) once the game is confirmed running.
 
 RPCS3 installs no signal handler, so a plain kill (no state requested, or
 the hotkey/wait having failed) is a safe stop: whatever the game already
-wrote to its own save data is on disk the moment it's written. cellSaveData
-saves under `dev_hdd0/home/00000001/savedata/`, cellGameData saves under
-`dev_hdd0/game/`.
+wrote to its own save data is on disk the moment it's written. Saves live
+under `dev_hdd0/home/00000001/savedata/`. `dev_hdd0/game/` holds installed
+titles, patches, DLC and disc games' HDD installs, none of it save data.
 
 The emulator is expected to be brought to a working state in desktop mode
 (firmware, GPU settings, controllers) before automated launching.
@@ -426,23 +426,6 @@ def _run_headless(args: list[str], what: str) -> None:
         log.error("rpcs3 %s: no exit within %.0fs, killing the process group", what, INSTALL_TIMEOUT)
         _kill_headless_group(proc, what)
         raise RuntimeError(f"rpcs3 {what} did not finish within {INSTALL_TIMEOUT:.0f}s")
-
-
-def _gamedata_dirs() -> list[Path]:
-    """List CellGameData save dirs under game/.
-
-    Everything except installed titles (which have a bootable EBOOT.BIN)
-    and RPCS3's lock folders.
-    """
-    dirs = []
-    if GAME_DIR.is_dir():
-        for d in sorted(GAME_DIR.iterdir()):
-            if not d.is_dir() or d.name.startswith(_LOCK_DIR_PREFIXES):
-                continue
-            if (d / "USRDIR" / "EBOOT.BIN").is_file():
-                continue
-            dirs.append(d)
-    return dirs
 
 
 def _installed_title_dirs() -> set[str]:
@@ -1081,7 +1064,7 @@ def _clear_leftover_states(title_id: str, before: dict) -> None:
 
 
 def _clear_stale_save_data() -> None:
-    """Empty the cellSaveData and cellGameData trees before an archive restore.
+    """Empty the save data tree before an archive restore.
 
     A restore only writes the members the incoming archive happens to name, so
     an earlier session's save dirs otherwise survive into this one: readable by
@@ -1089,12 +1072,12 @@ def _clear_stale_save_data() -> None:
     `save_and_exit`, which ships a session save dir whole rather than
     file by file.
 
-    Every dir under home/00000001/savedata and every cellGameData dir under
-    game/ goes, not just the incoming title's: a dir named for another title
-    holds another player's data just the same, and `_session_save_dirs` can
-    select one of those by its mtime alone. Savestates are handled separately
-    (see `clear_working_slot`), and installed PKG titles are not save data,
-    which is why the listing comes from `_gamedata_dirs`.
+    Every dir under home/00000001/savedata goes, not just the incoming
+    title's: a dir named for another title holds another player's data just
+    the same, and `_session_save_dirs` can select one of those by its mtime
+    alone. Savestates are handled separately (see `clear_working_slot`).
+    game/ is left alone: a disc game's HDD install there has no EBOOT.BIN
+    and costs the player a reinstall every boot if it goes.
     """
     targets: list[Path] = []
     savedata = USER_HOME / "savedata"
@@ -1103,7 +1086,6 @@ def _clear_stale_save_data() -> None:
             targets.extend(savedata.iterdir())
         except OSError as exc:
             log.warning("rpcs3: could not list %s to clear stale save data: %s", savedata, exc)
-    targets.extend(_gamedata_dirs())
     cleared = 0
     for entry in targets:
         try:
@@ -1335,10 +1317,7 @@ def _pine_title_id() -> Optional[str]:
 _SAVEDATA = "home/00000001/savedata"
 """The one user's save data folder, relative to `dev_hdd0`."""
 
-_SAVE_EXPECTED = (
-    "a PS3 save folder, home/00000001/savedata/<SAVEDIR>/, or a game data folder, "
-    "game/<DIR>/, each holding PARAM.SFO"
-)
+_SAVE_EXPECTED = "a PS3 save folder, home/00000001/savedata/<SAVEDIR>/, holding PARAM.SFO"
 """The accepted save shapes, in words, for a refusal."""
 
 _STATE_EXPECTED = "one RPCS3 savestate, <name>.SAVESTAT (or .SAVESTAT.zst or .SAVESTAT.gz)"
@@ -1348,7 +1327,7 @@ _UID_RE = re.compile(r"[0-9]{8}", re.ASCII)
 """A PS3 user's folder name under `home/`."""
 
 _SAVE_DIR_RE = re.compile(r"[A-Za-z0-9_-]{1,32}", re.ASCII)
-"""A save or game data folder's name: the characters and length a game gives one."""
+"""A save folder's name: the characters and length a game gives one."""
 
 _STATE_NAME_RE = re.compile(r"[^/]+\.SAVESTAT(?P<ext>\.zst|\.gz)?", re.ASCII)
 """A state file's name, in the exact case `_state_snapshot` globs for."""
@@ -1356,8 +1335,8 @@ _STATE_NAME_RE = re.compile(r"[^/]+\.SAVESTAT(?P<ext>\.zst|\.gz)?", re.ASCII)
 _PROTECTED = ("home/*/exdata/*", "home/*/trophy/*", "game/*/USRDIR/EBOOT.*")
 """Licences, trophies and an installed title's executable: RPCS3's own, whatever an archive says."""
 
-_UNIT_DEPTH = {"home": 4, "game": 2}
-"""Destination components that name one save unit: `home/<uid>/savedata/<SAVEDIR>` or `game/<DIR>`."""
+_UNIT_DEPTH = 4
+"""Destination components that name one save unit: `home/<uid>/savedata/<SAVEDIR>`."""
 
 
 def _session_serial(ctx: imports.ImportCtx) -> Optional[str]:
@@ -1379,42 +1358,16 @@ def _session_serial(ctx: imports.ImportCtx) -> Optional[str]:
     return cached if isinstance(cached, str) else None
 
 
-def _booted_game_dir(ctx: imports.ImportCtx) -> Optional[str]:
-    """Name the `game/` folder the boot target keeps its executable in.
-
-    A boot from an installed title's `EBOOT.BIN` names it through the path,
-    and a `.pkg` installs itself into a folder named for its title id. A
-    disc image runs from wherever it is and has no such folder, so a disc
-    title may import into its own `game/<id>`. The answer is lexical: it
-    reads nothing under `save_root`.
-
-    Args:
-        ctx: The launch context.
-
-    Returns:
-        The folder's name, or None when the boot target has none.
-    """
-    rom = ctx.rom_file
-    if rom is None:
-        return None
-    if rom.suffix.lower() == ".pkg":
-        return _session_serial(ctx)
-    try:
-        return rom.relative_to(GAME_DIR).parts[0]
-    except (ValueError, IndexError):
-        return None
-
-
 def _split_save(
     member: imports.ImportMember,
-) -> Union[tuple[str, tuple[str, ...]], imports.ImportRefusal]:
-    """Strip a save member's wrapper and say which tree it belongs to.
+) -> Union[tuple[str, ...], imports.ImportRefusal]:
+    """Strip a save member's wrapper down to the path below the save data tree.
 
     Args:
         member: The member.
 
     Returns:
-        `("savedata", rest)` or `("game", rest)` with the path below that tree, or a refusal.
+        The path below the save data tree, or a refusal.
     """
     parts = member.parts
     if parts[:1] == ("dev_hdd0",):
@@ -1428,7 +1381,7 @@ def _split_save(
         )
     if len(parts) >= 3 and parts[0] == "home" and _UID_RE.fullmatch(parts[1]):
         if parts[2] == "savedata":
-            return "savedata", parts[3:]
+            return parts[3:]
         if parts[2] in ("exdata", "trophy"):
             return imports.ImportRefusal(
                 "protected_destination",
@@ -1443,23 +1396,28 @@ def _split_save(
             detail=f"home/<user>/{parts[2]} is not save data",
         )
     if parts[:1] == ("game",):
-        return "game", parts[1:]
+        return imports.ImportRefusal(
+            "protected_destination",
+            member.name,
+            _SAVE_EXPECTED,
+            detail="game/ holds installed titles and disc installs, not saves",
+        )
     if parts[:2] == ("PS3", "SAVEDATA"):
-        return "savedata", parts[2:]
+        return parts[2:]
     if parts[:1] == ("SAVEDATA",):
-        return "savedata", parts[1:]
+        return parts[1:]
     return imports.ImportRefusal(
         "unrecognised_layout",
         member.name,
         _SAVE_EXPECTED,
-        detail="a bare folder is ambiguous: put it under home/00000001/savedata/ or game/",
+        detail="a bare folder is ambiguous: put it under home/00000001/savedata/",
     )
 
 
 def _place_save(
-    member: imports.ImportMember, ctx: imports.ImportCtx, session: imports.SessionIdentity
+    member: imports.ImportMember, session: imports.SessionIdentity
 ) -> Union[imports.Placement, imports.ImportRefusal]:
-    """Place one file of a save or game data folder.
+    """Place one file of a save folder.
 
     The user id is rewritten to `00000001`, the only user the broker's
     layout has. A folder named for another title is placed and logged, since
@@ -1467,33 +1425,19 @@ def _place_save(
 
     Args:
         member: The member.
-        ctx: The launch context.
         session: The session's identity.
 
     Returns:
         The placement, or a refusal.
     """
-    split = _split_save(member)
-    if isinstance(split, imports.ImportRefusal):
-        return split
-    area, rest = split
+    rest = _split_save(member)
+    if isinstance(rest, imports.ImportRefusal):
+        return rest
     if len(rest) < 2:
         return imports.ImportRefusal(
             "unrecognised_layout", member.name, _SAVE_EXPECTED, detail="a save is a folder, not one file"
         )
     unit, tail = rest[0], rest[1:]
-    if area == "game":
-        if unit.startswith(_LOCK_DIR_PREFIXES):
-            return imports.ImportRefusal(
-                "protected_destination", member.name, _SAVE_EXPECTED, detail="RPCS3's own lock folder"
-            )
-        if unit == _booted_game_dir(ctx):
-            return imports.ImportRefusal(
-                "protected_destination",
-                member.name,
-                _SAVE_EXPECTED,
-                detail=f"{unit} is the title being booted and keeps its own folder",
-            )
     if _SAVE_DIR_RE.fullmatch(unit) is None:
         return imports.ImportRefusal(
             "unrecognised_layout",
@@ -1501,10 +1445,9 @@ def _place_save(
             _SAVE_EXPECTED,
             detail=f"{unit!r} is not a PS3 save folder name",
         )
-    prefix = unit if area == "game" else unit[:9]
     refusal = imports.check_member_identity(
         member,
-        imports.NORMALISERS["ps_serial_nodash"](prefix),
+        imports.NORMALISERS["ps_serial_nodash"](unit[:9]),
         session,
         family="ps_serial_nodash",
         policy="advisory",
@@ -1512,9 +1455,7 @@ def _place_save(
     )
     if refusal is not None:
         return refusal
-    dest = imports.build_dest(
-        _SAVEDATA if area == "savedata" else "game", (unit,), tail, member=member, expected=_SAVE_EXPECTED
-    )
+    dest = imports.build_dest(_SAVEDATA, (unit,), tail, member=member, expected=_SAVE_EXPECTED)
     if isinstance(dest, imports.ImportRefusal):
         return dest
     return imports.Placement(member, dest)
@@ -1599,8 +1540,8 @@ def _place_state(
 class Rpcs3(Emulator):
     """RPCS3 (PS3) launcher: exit-only savestates via PINE, plus archive boot support.
 
-    Declared imports take PS3 save folders (save data under
-    `home/00000001/savedata`, game data under `game/`) and one savestate,
+    Declared imports take PS3 save folders (under `home/00000001/savedata`)
+    and one savestate,
     which rides the archive and is filed under the boot target's title id.
     See `import_spec`.
     """
@@ -1611,7 +1552,7 @@ class Rpcs3(Emulator):
     state_subtrees = ("savestates",)
     """States land under the symlinked `savestates` dir; see `_ensure_sstate_link`."""
     clears_stale_saves = True
-    """On: `clear_working_slot` empties every cellSaveData and cellGameData dir.
+    """On: `clear_working_slot` empties every save dir under `home/00000001/savedata`.
 
     Savestates are the one part of the tree cleared per title rather than
     whole, since a title the session never boots can hold states no dump has
@@ -1728,32 +1669,23 @@ class Rpcs3(Emulator):
 
     @property
     def save_subtrees(self) -> tuple[str, ...]:
-        """CellSaveData saves, save states, plus the cellGameData save dirs under game/.
-
-        game/ mixes save data with installed PKG titles and RPCS3's lock
-        folders, so the dump enumerates only the dirs without a bootable
-        EBOOT.BIN. A restore inverts the problem: the archive holds nothing
-        but previously dumped save dirs, and those dirs don't exist on disk
-        yet, so the whole game/ prefix is declared to let them through.
-        """
+        """Saves and savestates; game/ holds installs, which can run to gigabytes."""
         if self._restoring:
             return self.restore_subtrees
-        subtrees = ["home/00000001/savedata", "savestates"]
-        subtrees += [f"game/{d.name}" for d in _gamedata_dirs()]
-        return tuple(subtrees)
+        return (_SAVEDATA, "savestates")
 
     @property
     def restore_subtrees(self) -> tuple[str, ...]:
         """The restore set, whatever `_restoring` says.
 
         Preflight reads this before `clear_working_slot` has flipped
-        `_restoring`, and a restore needs the whole `game/` prefix: the dirs
-        it brings back do not exist on disk yet.
+        `_restoring`. It keeps `game/`, so an archive dumped before game/
+        left the save set still restores whole.
 
         Returns:
             Saves, the whole `game/` prefix, and savestates.
         """
-        return ("home/00000001/savedata", "game", "savestates")
+        return (_SAVEDATA, "game", "savestates")
 
     @property
     def link_roots(self) -> tuple[Path, ...]:
@@ -1769,10 +1701,9 @@ class Rpcs3(Emulator):
     def import_spec(self) -> imports.ImportSpec:
         """Declare what RPCS3 takes: PS3 save folders, and one savestate.
 
-        Save data and game data are both folders that must hold `PARAM.SFO`.
-        RPCS3 groups the units itself in `validate_import_plan`, because a
-        unit sits two or four components deep depending on the tree. The
-        state rides the archive and resumes through `save.resume_slot`.
+        A save is a folder that must hold `PARAM.SFO`, which RPCS3 checks
+        itself in `validate_import_plan`. The state rides the archive and
+        resumes through `save.resume_slot`.
 
         Returns:
             The spec.
@@ -1781,10 +1712,7 @@ class Rpcs3(Emulator):
             kinds=(
                 imports.KindSpec(
                     "save",
-                    (
-                        f"{_SAVEDATA}/<SAVEDIR>/ with PARAM.SFO",
-                        "game/<DIR>/ with PARAM.SFO",
-                    ),
+                    (f"{_SAVEDATA}/<SAVEDIR>/ with PARAM.SFO",),
                 ),
                 imports.KindSpec(
                     "state",
@@ -1813,7 +1741,7 @@ class Rpcs3(Emulator):
         """
         if member.kind == "state":
             return _place_state(member, ctx)
-        return _place_save(member, ctx, imports.identity_for(self, ctx))
+        return _place_save(member, imports.identity_for(self, ctx))
 
     def validate_import_plan(
         self, plan: list[imports.Placement], ctx: imports.ImportCtx
@@ -1831,8 +1759,7 @@ class Rpcs3(Emulator):
         for placement in plan:
             if placement.member.kind != "save":
                 continue
-            depth = _UNIT_DEPTH[placement.dest.parts[0]]
-            units.setdefault(placement.dest.parts[:depth], []).append(placement)
+            units.setdefault(placement.dest.parts[:_UNIT_DEPTH], []).append(placement)
         refusals = []
         for unit, members in units.items():
             if any(p.dest.parts[len(unit) :] == ("PARAM.SFO",) for p in members):
@@ -2206,7 +2133,6 @@ class Rpcs3(Emulator):
             return []
         savedata = USER_HOME / "savedata"
         candidates = sorted(d for d in savedata.iterdir() if d.is_dir()) if savedata.is_dir() else []
-        candidates += _gamedata_dirs()
         selected = []
         for d in candidates:
             if self._session_serial and d.name.startswith(self._session_serial):

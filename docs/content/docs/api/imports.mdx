@@ -137,7 +137,7 @@ through a symlink, or the member is refused.
 | `dolphin` on `ngc` | GameCube `.gci` saves, each in `<region>/Card A/` | the same as `save` | one `<game id>.sNN` that opens with the game's id; needs `save.resume_slot` |
 | `dolphin` on `wii` | Wii title saves, `title/<type>/<title id>/data/` | not taken | one `<game id>.sNN` that opens with the game's id; needs `save.resume_slot` |
 | `pcsx2` | one folder memory card: `<card>/_pcsx2_superblock` and its game folders | the same as `save` | `PUT /api/session/state-file` after activate |
-| `rpcs3` | PS3 save folders, `home/00000001/savedata/<SAVEDIR>/` and `game/<DIR>/`, each holding `PARAM.SFO` | not taken | one `.SAVESTAT`, `.SAVESTAT.zst` or `.SAVESTAT.gz`; needs `save.resume_slot` |
+| `rpcs3` | PS3 save folders, `home/00000001/savedata/<SAVEDIR>/`, each holding `PARAM.SFO` | not taken | one `.SAVESTAT`, `.SAVESTAT.zst` or `.SAVESTAT.gz`; needs `save.resume_slot` |
 | `scummvm` | `<game>.NNN` and `<game>.sNN` save files | not taken | one `<game>.sNN` or `<game>.NNN` file; needs `save.resume_slot` |
 | `cemu` | Wii U save data for the game being launched: `usr/save/00050000/<title>/` | not taken | not taken |
 | `eden` | Switch NAND save folders, `nand/user/save/<space>/<user>/<title>/`, with the profile store an account save needs | not taken | not taken |
@@ -367,21 +367,18 @@ savestates folder:
   `dev_hdd0/home/<user>/savedata/`, `home/<user>/savedata/`, `PS3/SAVEDATA/`
   or `SAVEDATA/`. The user is eight digits and is rewritten to `00000001`, the
   only user the broker's layout has, so two users' folders of one name are a
-  `destination_conflict`. Game data goes to `game/<DIR>/` and can arrive under
-  `dev_hdd0/game/` or `game/`.
-- A folder with none of those around it is `unrecognised_layout`: RPCS3 keeps
-  save data and game data apart, and a bare folder does not say which it is.
+  `destination_conflict`.
+- A folder with none of those around it is `unrecognised_layout`, since a bare
+  folder does not say where it came from.
   So is a folder name of anything but letters, digits, `_` and `-`, up to 32
   of them, a single file where a folder belongs, and a state sent as a save.
 - A folder without `PARAM.SFO` at its root is `incomplete_unit`, detail
   `missing PARAM.SFO`. One further down does not count.
 - A folder named for another game's serial is placed and only logged: a
   sequel or DLC writes its predecessor's folders.
-- `home/<user>/exdata/` and `home/<user>/trophy/`, a game's `USRDIR/EBOOT.*`,
-  RPCS3's lock folders under `game/` (a name starting with `$` or its
-  full-width form) and the game folder of the installed title being booted are
-  `protected_destination`. An installed title
-  is an `EBOOT.BIN` under the game folder, or a `.pkg`.
+- `home/<user>/exdata/`, `home/<user>/trophy/` and anything under `game/`
+  (under `dev_hdd0/` or not) are `protected_destination`: `game/` holds
+  installed titles, patches, DLC and disc games' HDD installs, not saves.
 - The state is one `.SAVESTAT`, `.SAVESTAT.zst` or `.SAVESTAT.gz`, in exactly
   that case, alone or in one folder named for the game's serial. It is renamed
   `<serial>_import.SAVESTAT` and filed under the serial the launch will look

@@ -1006,7 +1006,7 @@ _EXAMPLES: list[tuple[str, str, bytes]] = [
     ("ppsspp", ".import/save/ULUS10041DATA00/PARAM.SFO", b"sfo"),
     ("ppsspp", ".import/state/ULUS10041_1.00_1.ppst", b"progress"),
     ("rpcs3", ".import/save/home/00000001/savedata/BLUS30443-AUTOSAVE/PARAM.SFO", b"sfo"),
-    ("rpcs3", ".import/save/game/BLES00001/PARAM.SFO", b"sfo"),
+    ("rpcs3", ".import/save/PS3/SAVEDATA/BLES00001-SAVE/PARAM.SFO", b"sfo"),
     ("rpcs3", ".import/state/BLUS30443_1.SAVESTAT", b"progress"),
     ("scummvm", ".import/save/monkey.003", b"save"),
     ("scummvm", ".import/state/monkey.s02", b"progress"),
