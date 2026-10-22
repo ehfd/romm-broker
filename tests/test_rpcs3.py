@@ -3047,10 +3047,9 @@ def test_an_archive_carrying_game_data_restores_its_saves_and_passes_game_over(
             zf.writestr(zipfile.ZipInfo(name, date_time=(2099, 1, 1, 0, 0, 0)), b"data")
     body = buf.getvalue()
 
-    plan = saves.plan_v1(saves.read_archive(body), emu.save_root, emu.restore_subtrees, emu.retired_subtrees)
-    result = saves.write_save_archive(body, emu.save_root, saves.ArchivePlan(plan.names, plan.excluded_count))
+    result = saves.extract_save_archive(body, emu.save_root, emu.restore_subtrees, emu.retired_subtrees)
 
-    assert plan.problems == ()
+    assert result["error"] is None
     assert (result["written"], result["excluded"], result["failed"]) == (1, 2, 0)
     assert (rpcs3.USER_HOME / "savedata" / "BLUS30443-AUTO" / "SAVE.BIN").read_bytes() == b"data"
     assert not (rpcs3_dirs["game_dir"] / "BLES00001").exists()
@@ -3162,7 +3161,7 @@ def test_the_import_spec_takes_saves_and_one_archived_state() -> None:
     assert spec.state_channel == "archive"
     assert state is not None
     assert (state.requires_resume_slot, state.max_members, state.counts_v1) == (True, 1, True)
-    assert spec.protected == ("home/*/exdata/*", "home/*/trophy/*", "game/*")
+    assert spec.protected == ("home/*/exdata/*", "home/*/trophy/*")
     assert (spec.unit_depth, spec.card_subtree) == (0, None)
 
 
@@ -3320,12 +3319,10 @@ def test_a_savestate_declared_as_a_save_is_pointed_at_the_state_kind(booted: dic
         "home/00000001/exdata/UP0001-BLUS30443_00-0000000000000000.rap",
         "dev_hdd0/home/00000001/exdata/game.edat",
         "home/00000001/trophy/NPWR00001_00/TROPHY.TRP",
-        "game/$locks/BLUS30443",
-        "game/\uff04locks/BLUS30443",
     ],
 )
-def test_licences_trophies_and_lock_folders_are_protected(booted: dict[str, Path], member: str) -> None:
-    """RPCS3's licences, trophies and lock folders are its own, whatever the archive says.
+def test_licences_and_trophies_are_protected(booted: dict[str, Path], member: str) -> None:
+    """RPCS3's licences and trophies are its own, whatever the archive says.
 
     Args:
         booted: The patched RPCS3 layout.

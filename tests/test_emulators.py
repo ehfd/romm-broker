@@ -781,7 +781,7 @@ def test_a_retired_subtree_shares_nothing_with_the_save_set(name: str) -> None:
 
     for retired in emu.retired_subtrees:
         assert not any(
-            s == retired or s.startswith(retired + "/") or retired.startswith(s + "/") for s in live
+            base._under_subtree(s, retired) or base._under_subtree(retired, s) for s in live
         ), f"{name} retires {retired}"
 
 

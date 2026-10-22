@@ -1081,15 +1081,14 @@ def _clear_stale_save_data() -> None:
     a restore writes nothing there (`Rpcs3.retired_subtrees`): what it wrote
     would never be cleared.
     """
-    targets: list[Path] = []
     savedata = USER_HOME / "savedata"
-    if savedata.is_dir():
-        try:
-            targets.extend(savedata.iterdir())
-        except OSError as exc:
-            log.warning("rpcs3: could not list %s to clear stale save data: %s", savedata, exc)
+    try:
+        entries = list(savedata.iterdir()) if savedata.is_dir() else []
+    except OSError as exc:
+        log.warning("rpcs3: could not list %s to clear stale save data: %s", savedata, exc)
+        return
     cleared = 0
-    for entry in targets:
+    for entry in entries:
         try:
             if entry.is_dir() and not entry.is_symlink():
                 shutil.rmtree(entry)
@@ -1334,8 +1333,8 @@ _SAVE_DIR_RE = re.compile(r"[A-Za-z0-9_-]{1,32}", re.ASCII)
 _STATE_NAME_RE = re.compile(r"[^/]+\.SAVESTAT(?P<ext>\.zst|\.gz)?", re.ASCII)
 """A state file's name, in the exact case `_state_snapshot` globs for."""
 
-_PROTECTED = ("home/*/exdata/*", "home/*/trophy/*", "game/*")
-"""Licences, trophies and the installs under `game/`: RPCS3's own, whatever an archive says."""
+_PROTECTED = ("home/*/exdata/*", "home/*/trophy/*")
+"""Licences and trophies: RPCS3's own, whatever an archive says. `_split_save` refuses `game/`."""
 
 _UNIT_DEPTH = 4
 """Destination components that name one save unit: `home/<uid>/savedata/<SAVEDIR>`."""
@@ -1645,9 +1644,8 @@ class Rpcs3(Emulator):
         rather than guessing.
 
         Args:
-            excluded: Subtrees the restore passes over: `retired_subtrees`,
-                which this clear leaves alone too. RPCS3 names no memory card
-                subtree.
+            excluded: Subtrees carried by the whole-card routes. RPCS3 names no
+                memory card subtree, so this is always empty.
         """
         _ensure_sstate_link()
         _clear_stale_save_data()
