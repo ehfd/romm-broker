@@ -769,6 +769,23 @@ def test_restore_subtrees_covers_every_save_subtree(name: str) -> None:
 
 
 @pytest.mark.parametrize("name", sorted(emulators.REGISTRY))
+def test_a_retired_subtree_shares_nothing_with_the_save_set(name: str) -> None:
+    """A restore drops whatever sits under a retired subtree, so one must not reach a live save.
+
+    Args:
+        name: The registry name.
+    """
+    emu = emulators.get_emulator(name)
+    assert emu is not None
+    live = (*emu.save_subtrees, *emu.restore_subtrees)
+
+    for retired in emu.retired_subtrees:
+        assert not any(
+            s == retired or s.startswith(retired + "/") or retired.startswith(s + "/") for s in live
+        ), f"{name} retires {retired}"
+
+
+@pytest.mark.parametrize("name", sorted(emulators.REGISTRY))
 def test_only_rpcs3_declares_a_link_root(name: str) -> None:
     """A link root widens what a restore may write through, so each one is deliberate.
 

@@ -1077,7 +1077,9 @@ def _clear_stale_save_data() -> None:
     the same, and `_session_save_dirs` can select one of those by its mtime
     alone. Savestates are handled separately (see `clear_working_slot`).
     game/ is left alone: a disc game's HDD install there has no EBOOT.BIN
-    and costs the player a reinstall every boot if it goes.
+    and costs the player a reinstall every boot if it goes. That is also why
+    a restore writes nothing there (`Rpcs3.retired_subtrees`): what it wrote
+    would never be cleared.
     """
     targets: list[Path] = []
     savedata = USER_HOME / "savedata"
@@ -1332,8 +1334,8 @@ _SAVE_DIR_RE = re.compile(r"[A-Za-z0-9_-]{1,32}", re.ASCII)
 _STATE_NAME_RE = re.compile(r"[^/]+\.SAVESTAT(?P<ext>\.zst|\.gz)?", re.ASCII)
 """A state file's name, in the exact case `_state_snapshot` globs for."""
 
-_PROTECTED = ("home/*/exdata/*", "home/*/trophy/*", "game/*/USRDIR/EBOOT.*")
-"""Licences, trophies and an installed title's executable: RPCS3's own, whatever an archive says."""
+_PROTECTED = ("home/*/exdata/*", "home/*/trophy/*", "game/*")
+"""Licences, trophies and the installs under `game/`: RPCS3's own, whatever an archive says."""
 
 _UNIT_DEPTH = 4
 """Destination components that name one save unit: `home/<uid>/savedata/<SAVEDIR>`."""
@@ -1541,16 +1543,24 @@ class Rpcs3(Emulator):
     """RPCS3 (PS3) launcher: exit-only savestates via PINE, plus archive boot support.
 
     Declared imports take PS3 save folders (under `home/00000001/savedata`)
-    and one savestate,
-    which rides the archive and is filed under the boot target's title id.
-    See `import_spec`.
+    and one savestate, which rides the archive and is filed under the boot
+    target's title id. See `import_spec`.
     """
 
     name = "rpcs3"
     display_name = "RPCS3"
     save_root = DEV_HDD0
+    save_subtrees = (_SAVEDATA, "savestates")
+    """Saves and savestates; `game/` holds installs, which can run to gigabytes."""
     state_subtrees = ("savestates",)
     """States land under the symlinked `savestates` dir; see `_ensure_sstate_link`."""
+    retired_subtrees = ("game",)
+    """`game/`: an older archive may still carry it, and a restore passes it over rather than writing it.
+
+    Nothing clears or dumps `game/`, so a member written there would outlive
+    the session and reach every later player, and a member dated newer than
+    an install's own file would overwrite it, executable included.
+    """
     clears_stale_saves = True
     """On: `clear_working_slot` empties every save dir under `home/00000001/savedata`.
 
@@ -1559,7 +1569,6 @@ class Rpcs3(Emulator):
     carried off yet; the ones a session cannot scope by title id are handled
     by `_clear_leftover_states` once PINE names the title.
     """
-    _restoring = False
     _pending_rom: Optional[Path] = None
     """Boot target this activate resolved, or None when none was resolved.
 
@@ -1624,26 +1633,24 @@ class Rpcs3(Emulator):
         every activate, but never during a bare construction (registry
         sweeps build every emulator against real, unredirected paths).
 
-        It also drops the incoming title's own savestates dir and flips
-        _restoring on early. Clearing first means a leftover local state from
-        a previous session never outranks (by mtime) whatever this session's
-        archive restores. Only that one title goes: every other title's dir
-        holds states that may not have been archived yet (a crashed session,
-        a title mid-restore for a different game), and none of them can
-        outrank this session's states anyway because every lookup is already
-        scoped to SSTATE_ROOT/<title id>. A boot target that carries no
-        title id (an archive, an .iso with no readable PARAM.SFO) therefore
-        clears nothing rather than guessing. Flipping _restoring here, not
-        just in prepare_restore(), matters because api.py reads save_subtrees
-        for the restore extract before it ever calls prepare_restore().
+        It also drops the incoming title's own savestates dir. Clearing first
+        means a leftover local state from a previous session never outranks
+        (by mtime) whatever this session's archive restores. Only that one
+        title goes: every other title's dir holds states that may not have
+        been archived yet (a crashed session, a title mid-restore for a
+        different game), and none of them can outrank this session's states
+        anyway because every lookup is already scoped to
+        SSTATE_ROOT/<title id>. A boot target that carries no title id (an
+        archive, an .iso with no readable PARAM.SFO) therefore clears nothing
+        rather than guessing.
 
         Args:
-            excluded: Subtrees carried by the whole-card routes. RPCS3 names no
-                memory card subtree, so this is always empty.
+            excluded: Subtrees the restore passes over: `retired_subtrees`,
+                which this clear leaves alone too. RPCS3 names no memory card
+                subtree.
         """
         _ensure_sstate_link()
         _clear_stale_save_data()
-        self._restoring = True
         self._leftover_snapshot = None
         rom = self._pending_rom
         title_id = _rom_title_id(rom) if rom is not None else None
@@ -1666,26 +1673,6 @@ class Rpcs3(Emulator):
             )
         else:
             log.debug("rpcs3: cleared stale savestates for %s", title_id)
-
-    @property
-    def save_subtrees(self) -> tuple[str, ...]:
-        """Saves and savestates; game/ holds installs, which can run to gigabytes."""
-        if self._restoring:
-            return self.restore_subtrees
-        return (_SAVEDATA, "savestates")
-
-    @property
-    def restore_subtrees(self) -> tuple[str, ...]:
-        """The restore set, whatever `_restoring` says.
-
-        Preflight reads this before `clear_working_slot` has flipped
-        `_restoring`. It keeps `game/`, so an archive dumped before game/
-        left the save set still restores whole.
-
-        Returns:
-            Saves, the whole `game/` prefix, and savestates.
-        """
-        return (_SAVEDATA, "game", "savestates")
 
     @property
     def link_roots(self) -> tuple[Path, ...]:
@@ -1781,9 +1768,8 @@ class Rpcs3(Emulator):
         return imports.IdentitySource("ps_serial_nodash", rom_reader=_rom_title_id)
 
     def prepare_restore(self) -> None:
-        """Stop any running instance and mark the session as archive-restoring."""
+        """Stop any running instance, so nothing holds a save open while the restore writes."""
         self.stop()
-        self._restoring = True
 
     def resolve_rom_file(self, path: Path) -> Optional[Path]:
         """Resolve a RomM path to a single bootable PKG, disc, or ISO.
@@ -1922,7 +1908,6 @@ class Rpcs3(Emulator):
                 library and the emulator's own data dirs.
         """
         self.stop()
-        self._restoring = False
         self._exit_state = None
         self.boot_failed = False
         self._launch_seq += 1

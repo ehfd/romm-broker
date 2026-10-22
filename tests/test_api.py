@@ -432,6 +432,53 @@ def test_activate_restores_a_savestate_through_rpcs3s_link_root(
     assert rpcs3_session["sstate_link"].is_symlink()
 
 
+@pytest.mark.parametrize("linked", [False, True], ids=["game-dir", "game-dir-linked-off-the-root"])
+def test_activate_restores_an_rpcs3_archive_and_passes_its_game_data_over(
+    client: TestClient,
+    broker_dirs: dict[str, Path],
+    rpcs3_session: dict[str, Path],
+    tmp_path: Path,
+    linked: bool,
+) -> None:
+    """An archive carrying `game/` restores its save and writes nothing under `game/`.
+
+    Nothing clears or dumps `game/`, so a member written there would reach
+    every later session. A `game/` linked off the root, onto a bigger disk,
+    must not refuse the restore over members it never writes.
+
+    Args:
+        client: The app client.
+        broker_dirs: The redirected ROM root and archive directories.
+        rpcs3_session: The redirected RPCS3 layout.
+        tmp_path: The per-test temporary directory.
+        linked: Whether `dev_hdd0/game` is a symlink to a dir outside `dev_hdd0`.
+    """
+    game_dir = rpcs3_session["dev_hdd0"] / "game"
+    if linked:
+        game_dir.rmdir()
+        elsewhere = tmp_path / "games-disk"
+        elsewhere.mkdir()
+        game_dir.symlink_to(elsewhere)
+    archive = broker_dirs["imports"] / "sess-1.zip"
+    archive.write_bytes(
+        _zip(
+            {
+                "home/00000001/savedata/BLUS30443-AUTO/SAVE.BIN": b"progress",
+                "game/BLES00001/USRDIR/DATA.BIN": b"data",
+            }
+        )
+    )
+
+    response = _activate(client, broker_dirs, emulator="rpcs3", save={"archive": str(archive)})
+
+    assert response.status_code == 200, response.text
+    restore = response.json()["save_restore"]
+    assert (restore["written"], restore["excluded"], restore["failed"]) == (1, 1, 0)
+    save = rpcs3_session["dev_hdd0"] / "home" / "00000001" / "savedata" / "BLUS30443-AUTO" / "SAVE.BIN"
+    assert save.read_bytes() == b"progress"
+    assert list(game_dir.iterdir()) == []
+
+
 def test_activate_refuses_a_save_archive_that_is_not_there(
     client: TestClient, broker_dirs: dict[str, Path], fake_emulator: list[FakeEmulator], tmp_path: Path
 ) -> None:

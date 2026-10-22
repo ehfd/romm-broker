@@ -420,7 +420,9 @@ same way DuckStation's is. The game's own save
 data, under `dev_hdd0/home/`, persists separately from all of this.
 `dev_hdd0/game/` is not save data: it holds installed titles, patches, DLC
 and the HDD installs disc games make on first boot, which stay on the
-webstation between sessions and never ride the save archive.
+webstation between sessions and never ride the save archive. An older
+archive that still carries `game/` files restores its saves and skips the
+`game/` files.
 
 A [declared import](/docs/api/imports#what-each-emulator-takes) can bring in
 PS3 save folders, each with its `PARAM.SFO`, which land under

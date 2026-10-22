@@ -434,7 +434,8 @@ def _archive_subtrees(
     inside an older archive would land on top of the one RomM just laid down.
     The excluded set is returned rather than simply dropped because archives
     RomM took before the card was synced still carry it, and a restore has to
-    pass those members over instead of refusing the whole archive.
+    pass those members over instead of refusing the whole archive. A restore
+    passes the emulator's `retired_subtrees` over for the same reason.
 
     Args:
         emulator: The emulator whose save layout is being consulted.
@@ -447,10 +448,11 @@ def _archive_subtrees(
         to pass over on a restore and skip on a dump.
     """
     subtrees = emulator.restore_subtrees if restore else emulator.save_subtrees
+    retired = tuple(emulator.retired_subtrees) if restore else ()
     if not memory_card_synced or emulator.memory_card_subtree is None:
-        return subtrees, ()
+        return subtrees, retired
     card = emulator.memory_card_subtree
-    return tuple(s for s in subtrees if s != card), (card,)
+    return tuple(s for s in subtrees if s != card), (card, *retired)
 
 
 def _archive_identity(sess: dict[str, Any], emulator: Emulator) -> dict[str, Any]:
@@ -756,9 +758,11 @@ async def _start_session(body: ActivateIn, request: Request) -> dict[str, Any]:
         else:
             # Dropping the archive and still answering "launching" is how a
             # player ends up booting a fresh save with nothing to tell them.
+            # `excluded` also holds retired subtrees, which say nothing about the card.
+            card_excluded = emulator.memory_card_subtree in excluded
             restore_skipped = (
                 f"{emulator.name} ships its whole save tree on the memory-card routes"
-                if excluded
+                if card_excluded
                 else f"{emulator.name} names no save subtree to restore into"
             )
             log.warning(
@@ -783,7 +787,7 @@ async def _start_session(body: ActivateIn, request: Request) -> dict[str, Any]:
             if skipped is not None and skipped.imports:
                 # Dropping a declared import is exactly the silent loss the
                 # refusal list exists to prevent.
-                reason = "memcard_synced_separately" if excluded else "kind_not_accepted"
+                reason = "memcard_synced_separately" if card_excluded else "kind_not_accepted"
                 log.warning(
                     "activate: save archive %s refused: %d import member(s) are %s",
                     save.archive,

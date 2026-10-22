@@ -363,20 +363,6 @@ def test_clearing_the_working_slot_records_no_snapshot_when_the_title_is_known(
     assert emu._leftover_snapshot is None
 
 
-def test_clearing_the_working_slot_enters_restoring_mode(rpcs3_dirs: dict[str, Path]) -> None:
-    """clear_working_slot must flip _restoring itself, not prepare_restore().
-
-    api.py reads save_subtrees for the restore extract before it calls
-    prepare_restore(), so clear_working_slot has to flip _restoring itself.
-    """
-    emu = rpcs3.Rpcs3()
-
-    emu.clear_working_slot()
-
-    assert emu._restoring is True
-    assert emu.save_subtrees == ("home/00000001/savedata", "game", "savestates")
-
-
 # -- stale save data --
 
 
@@ -525,14 +511,6 @@ def test_exit_cannot_ship_a_previous_players_leftover_saves(
 # -- save_subtrees --
 
 
-def test_save_subtrees_includes_savestates_when_dumping(rpcs3_dirs: dict[str, Path]) -> None:
-    """Save subtrees includes savestates when dumping."""
-    emu = rpcs3.Rpcs3()
-
-    assert "savestates" in emu.save_subtrees
-    assert "home/00000001/savedata" in emu.save_subtrees
-
-
 def test_the_dump_leaves_out_everything_under_game(rpcs3_dirs: dict[str, Path]) -> None:
     """Installed titles, patches and disc installs under game/ are not save data."""
     _hdd_install(rpcs3_dirs["game_dir"])
@@ -544,7 +522,7 @@ def test_the_dump_leaves_out_everything_under_game(rpcs3_dirs: dict[str, Path]) 
 def test_the_dump_ships_the_save_beside_an_install_over_the_size_limit(
     rpcs3_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A disc install bigger than the dump's size limit no longer sinks the save beside it."""
+    """A disc install bigger than the dump's size limit does not sink the save beside it."""
     monkeypatch.setattr(saves, "SAVE_FILE_MAX_BYTES", 1024)
     baseline = time.time() - 1
     _hdd_install(rpcs3_dirs["game_dir"], size=4096)
@@ -559,12 +537,15 @@ def test_the_dump_ships_the_save_beside_an_install_over_the_size_limit(
         assert "home/00000001/savedata/BLUS30359-SAVE/SAVE.DAT" in zf.namelist()
 
 
-def test_save_subtrees_includes_savestates_when_restoring(rpcs3_dirs: dict[str, Path]) -> None:
-    """Save subtrees includes savestates when restoring."""
+def test_a_restore_writes_into_what_the_dump_ships_and_passes_game_over(rpcs3_dirs: dict[str, Path]) -> None:
+    """A restore writes only where the dump reads, before the clear or after, and never into game/."""
     emu = rpcs3.Rpcs3()
-    emu._restoring = True
+    before = emu.restore_subtrees
 
-    assert emu.save_subtrees == ("home/00000001/savedata", "game", "savestates")
+    emu.clear_working_slot()
+
+    assert before == emu.restore_subtrees == emu.save_subtrees == ("home/00000001/savedata", "savestates")
+    assert emu.retired_subtrees == ("game",)
 
 
 # -- state snapshot / diff --
@@ -3042,32 +3023,38 @@ def test_a_v1_state_restores_when_the_link_is_made_after_the_plan(rpcs3_dirs: di
     assert (rpcs3_dirs["sstate_root"] / "BLUS30443" / "BLUS30443.SAVESTAT").exists()
 
 
-def test_restore_subtrees_is_the_whole_restore_set_before_the_clear() -> None:
-    """Preflight runs before the clear flips `_restoring`, so it must not depend on it."""
-    emu = rpcs3.Rpcs3()
+def test_an_archive_carrying_game_data_restores_its_saves_and_passes_game_over(
+    rpcs3_dirs: dict[str, Path],
+) -> None:
+    """An archive holding game/ members restores its saves and writes nothing under game/.
 
-    assert emu.restore_subtrees == ("home/00000001/savedata", "game", "savestates")
-
-
-def test_an_archive_dumped_with_game_data_still_restores_whole(rpcs3_dirs: dict[str, Path]) -> None:
-    """An archive from before game/ left the save set brings its game/ files back too.
+    Whatever lands in game/ is never cleared or dumped, so it would reach
+    every later session; an install's own file is newer than the member here
+    and still must not be touched.
 
     Args:
         rpcs3_dirs: The patched RPCS3 layout.
     """
+    install = _hdd_install(rpcs3_dirs["game_dir"])
     emu = rpcs3.Rpcs3()
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
-        for name in ("home/00000001/savedata/BLUS30443-AUTO/SAVE.BIN", "game/BLES00001/USRDIR/DATA.BIN"):
-            zf.writestr(zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0)), b"data")
+        for name in (
+            "home/00000001/savedata/BLUS30443-AUTO/SAVE.BIN",
+            "game/BLES00001/USRDIR/DATA.BIN",
+            "game/BLUS30359/USRDIR/install.dat",
+        ):
+            zf.writestr(zipfile.ZipInfo(name, date_time=(2099, 1, 1, 0, 0, 0)), b"data")
     body = buf.getvalue()
 
-    plan = saves.plan_v1(saves.read_archive(body), emu.save_root, emu.restore_subtrees, ())
-    result = saves.write_save_archive(body, emu.save_root, saves.ArchivePlan(plan.names, 0))
+    plan = saves.plan_v1(saves.read_archive(body), emu.save_root, emu.restore_subtrees, emu.retired_subtrees)
+    result = saves.write_save_archive(body, emu.save_root, saves.ArchivePlan(plan.names, plan.excluded_count))
 
     assert plan.problems == ()
-    assert (result["written"], result["failed"]) == (2, 0)
-    assert (rpcs3_dirs["game_dir"] / "BLES00001" / "USRDIR" / "DATA.BIN").read_bytes() == b"data"
+    assert (result["written"], result["excluded"], result["failed"]) == (1, 2, 0)
+    assert (rpcs3.USER_HOME / "savedata" / "BLUS30443-AUTO" / "SAVE.BIN").read_bytes() == b"data"
+    assert not (rpcs3_dirs["game_dir"] / "BLES00001").exists()
+    assert (install / "USRDIR" / "install.dat").read_bytes() == b"\0" * 16
 
 
 # -- declared imports --
@@ -3175,7 +3162,7 @@ def test_the_import_spec_takes_saves_and_one_archived_state() -> None:
     assert spec.state_channel == "archive"
     assert state is not None
     assert (state.requires_resume_slot, state.max_members, state.counts_v1) == (True, 1, True)
-    assert spec.protected == ("home/*/exdata/*", "home/*/trophy/*", "game/*/USRDIR/EBOOT.*")
+    assert spec.protected == ("home/*/exdata/*", "home/*/trophy/*", "game/*")
     assert (spec.unit_depth, spec.card_subtree) == (0, None)
 
 

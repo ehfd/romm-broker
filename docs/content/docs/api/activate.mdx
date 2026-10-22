@@ -164,7 +164,8 @@ archive without imports answers 422 `save restore failed: <message>`, and
 one with imports lists the file as `unrecognised_layout`, `unsafe_path` or
 `unreadable_member`. A corrupt file refuses the restore even when a newer
 copy on disk means it would not have been written. Only a synced memory
-card sitting in an older archive gets skipped.
+card sitting in an older archive gets skipped, along with RPCS3's
+`dev_hdd0/game/` files in an archive from before they left the save set.
 
 A `save.archive` path that doesn't exist answers `404`. If checking the
 imports against the emulator crashes outright, activate answers `500` with
