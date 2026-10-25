@@ -1535,7 +1535,7 @@ def test_exit_names_the_hotkey_when_no_state_appears(
 def test_exit_waits_for_the_reboot_load_before_restamping_and_stopping(
     rpcs3_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Stopping mid-reboot can kill a game data rewrite the dump would then ship."""
+    """Stopping mid-reboot can leave a game data rewrite half done, and nothing clears game/ after."""
     emu = _exit_confirming(
         monkeypatch, rpcs3_dirs["sstate_root"] / "BLUS30443" / "BLUS30443_1.SAVESTAT"
     )
