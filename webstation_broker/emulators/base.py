@@ -746,6 +746,8 @@ class Emulator:
             restore and dump are scoped to these.
         state_subtrees: The subset of `save_subtrees` holding savestates, for
             labelling an archive's members.
+        retired_subtrees: Subtrees older archives carry that a restore passes
+            over instead of writing.
         rom_extensions: File extensions the emulator will boot, in preference
             order.
         supports_states: Whether the emulator can save and load state
@@ -835,6 +837,15 @@ class Emulator:
     Empty for emulators with no states, and for the few whose states share a
     directory with their saves; those tell the two apart in `save_file_kind`
     instead.
+    """
+    retired_subtrees: tuple[str, ...] = ()
+    """Subtrees older archives carry that a restore passes over instead of writing.
+
+    A subtree that leaves `save_subtrees` still sits in every archive dumped
+    while it was in. Listing it here has activate count and drop those
+    members, the way it drops a separately synced memory card, so such an
+    archive restores its saves without writing into a tree that no later
+    clear or dump looks after.
     """
     rom_extensions: tuple[str, ...] = ()
     """File extensions the emulator will boot, in preference order."""

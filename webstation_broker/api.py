@@ -810,7 +810,8 @@ async def _start_session(body: ActivateIn, request: Request) -> dict[str, Any]:
                     view,
                     emulator.save_root,
                     subtrees,
-                    excluded,
+                    # Older archives still carry retired subtrees; pass them over too.
+                    (*excluded, *emulator.retired_subtrees),
                     link_roots=emulator.link_roots,
                 )
             )

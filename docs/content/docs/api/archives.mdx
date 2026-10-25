@@ -63,7 +63,8 @@ restore before anything is cleared (it is listed as `unrecognised_layout` in
 an archive with imports), and so does an encrypted file, one with a
 compression method the broker cannot read, or one whose data is corrupt. The
 broker reads every file in full to check before it clears anything. Only a
-synced memory card in an older archive is skipped.
+synced memory card in an older archive is skipped, along with RPCS3's
+`dev_hdd0/game/` files in an older archive.
 That's what keeps an old archive from rolling a session backward. When an
 archive is built at exit, only the files that changed since launch go into
 it, so an archive holds just the changes, not a full copy of the save data.

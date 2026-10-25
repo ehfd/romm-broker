@@ -23,7 +23,7 @@ and [wiring it into RomM](/docs/container#wiring-it-into-romm).
 | `azahar` | 3DS | no | no | the SD `title/` and `extdata/` trees and the NAND `extdata/` and `sysdata/` trees |
 | `eden` | Switch | no | no | `nand/user/save/` plus the profile store under `nand/system/save/` |
 | `shadps4` | PlayStation 4 | no | no | `home/1000/savedata/` |
-| `rpcs3` | PlayStation 3 | no (a resume state is written at exit) | no | the save directories under `dev_hdd0/` |
+| `rpcs3` | PlayStation 3 | no (a resume state is written at exit) | no | `home/00000001/savedata/` and `savestates/` under `dev_hdd0/` |
 | `xemu` | Xbox | no | no | extracted from the HDD image into a staging directory |
 | `xenia` | Xbox 360 | no | no | `content/` under `XENIA_DATA_DIR` |
 | `scummvm` | LucasArts and Sierra era adventure games | yes, over the Global Main Menu | no | `saves/` under `SCUMMVM_DATA_DIR` |
@@ -418,9 +418,15 @@ per title, so `resume_slot` always finds the right one. The state an exit
 confirms is served through the state-file GET until the next activate, the
 same way DuckStation's is. The game's own save
 data, under `dev_hdd0/home/`, persists separately from all of this.
+`dev_hdd0/game/` is not save data: it holds installed titles, patches, DLC
+and the HDD installs disc games make on first boot, which stay on the
+webstation between sessions and never ride the save archive. An older
+archive that still carries `game/` files restores its saves and skips the
+`game/` files.
 
 A [declared import](/docs/api/imports#what-each-emulator-takes) can bring in
-PS3 save folders, each with its `PARAM.SFO`, or one savestate, which needs
+PS3 save folders, each with its `PARAM.SFO`, which land under
+`dev_hdd0/home/00000001/savedata/`, or one savestate, which needs
 `resume_slot` and which the game boots straight into. The savestate has to
 belong to the game being launched, and a rom the broker can read no title id
 from, such as an `.iso` without a readable `PARAM.SFO`, takes none.

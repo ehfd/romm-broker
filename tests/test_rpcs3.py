@@ -363,20 +363,6 @@ def test_clearing_the_working_slot_records_no_snapshot_when_the_title_is_known(
     assert emu._leftover_snapshot is None
 
 
-def test_clearing_the_working_slot_enters_restoring_mode(rpcs3_dirs: dict[str, Path]) -> None:
-    """clear_working_slot must flip _restoring itself, not prepare_restore().
-
-    api.py reads save_subtrees for the restore extract before it calls
-    prepare_restore(), so clear_working_slot has to flip _restoring itself.
-    """
-    emu = rpcs3.Rpcs3()
-
-    emu.clear_working_slot()
-
-    assert emu._restoring is True
-    assert emu.save_subtrees == ("home/00000001/savedata", "game", "savestates")
-
-
 # -- stale save data --
 
 
@@ -430,15 +416,34 @@ def test_clearing_the_working_slot_drops_save_data_without_a_resolved_rom(
     assert not leftover.exists()
 
 
-def test_clearing_the_working_slot_drops_stale_game_data(
-    rpcs3_dirs: dict[str, Path],
+def _hdd_install(game_dir: Path, size: int = 16) -> Path:
+    """Write a disc game's HDD install: `game/<id>/` with data under USRDIR and no EBOOT.BIN.
+
+    Args:
+        game_dir: The `dev_hdd0/game` dir.
+        size: The install data's size in bytes.
+
+    Returns:
+        The install's folder.
+    """
+    install = game_dir / "BLUS30359"
+    _touch(install / "PARAM.SFO")
+    _touch(install / "USRDIR" / "install.dat").write_bytes(b"\0" * size)
+    return install
+
+
+def test_clearing_the_working_slot_keeps_a_disc_games_hdd_install(
+    rpcs3_dirs: dict[str, Path], tmp_path: Path
 ) -> None:
-    """Game data under game/ is save data too, and goes with the rest."""
-    gamedata = _touch(rpcs3_dirs["game_dir"] / "BLES00002" / "USRDIR" / "DATA.BIN")
+    """A disc game's HDD install has no EBOOT.BIN; clearing it costs a reinstall every boot."""
+    install = _hdd_install(rpcs3_dirs["game_dir"])
+    iso = _touch(tmp_path / "roms" / "game.iso")
 
-    rpcs3.Rpcs3().clear_working_slot()
+    emu = rpcs3.Rpcs3()
+    emu.resolve_rom_file(iso)
+    emu.clear_working_slot()
 
-    assert not gamedata.exists()
+    assert (install / "USRDIR" / "install.dat").exists()
 
 
 def test_clearing_the_working_slot_keeps_installed_pkg_titles(
@@ -506,20 +511,41 @@ def test_exit_cannot_ship_a_previous_players_leftover_saves(
 # -- save_subtrees --
 
 
-def test_save_subtrees_includes_savestates_when_dumping(rpcs3_dirs: dict[str, Path]) -> None:
-    """Save subtrees includes savestates when dumping."""
+def test_the_dump_leaves_out_everything_under_game(rpcs3_dirs: dict[str, Path]) -> None:
+    """Installed titles, patches and disc installs under game/ are not save data."""
+    _hdd_install(rpcs3_dirs["game_dir"])
+    _touch(rpcs3_dirs["game_dir"] / "BLUS30443" / "USRDIR" / "EBOOT.BIN")
+
+    assert rpcs3.Rpcs3().save_subtrees == ("home/00000001/savedata", "savestates")
+
+
+def test_the_dump_ships_the_save_beside_an_install_over_the_size_limit(
+    rpcs3_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A disc install bigger than the dump's size limit does not sink the save beside it."""
+    monkeypatch.setattr(saves, "SAVE_FILE_MAX_BYTES", 1024)
+    baseline = time.time() - 1
+    _hdd_install(rpcs3_dirs["game_dir"], size=4096)
+    _touch(rpcs3.USER_HOME / "savedata" / "BLUS30359-SAVE" / "SAVE.DAT").write_bytes(b"progress")
+
     emu = rpcs3.Rpcs3()
+    report = saves.build_save_archive(emu.save_root, emu.save_subtrees, baseline)
 
-    assert "savestates" in emu.save_subtrees
-    assert "home/00000001/savedata" in emu.save_subtrees
+    assert report["error"] is None
+    assert report["zip_bytes"] is not None
+    with zipfile.ZipFile(io.BytesIO(report["zip_bytes"])) as zf:
+        assert "home/00000001/savedata/BLUS30359-SAVE/SAVE.DAT" in zf.namelist()
 
 
-def test_save_subtrees_includes_savestates_when_restoring(rpcs3_dirs: dict[str, Path]) -> None:
-    """Save subtrees includes savestates when restoring."""
+def test_a_restore_writes_into_what_the_dump_ships_and_passes_game_over(rpcs3_dirs: dict[str, Path]) -> None:
+    """A restore writes only where the dump reads, before the clear or after, and never into game/."""
     emu = rpcs3.Rpcs3()
-    emu._restoring = True
+    before = emu.restore_subtrees
 
-    assert emu.save_subtrees == ("home/00000001/savedata", "game", "savestates")
+    emu.clear_working_slot()
+
+    assert before == emu.restore_subtrees == emu.save_subtrees == ("home/00000001/savedata", "savestates")
+    assert emu.retired_subtrees == ("game",)
 
 
 # -- state snapshot / diff --
@@ -1509,7 +1535,7 @@ def test_exit_names_the_hotkey_when_no_state_appears(
 def test_exit_waits_for_the_reboot_load_before_restamping_and_stopping(
     rpcs3_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Stopping mid-reboot can kill a game data rewrite the dump would then ship."""
+    """Stopping mid-reboot can leave a game data rewrite half done, and nothing clears game/ after."""
     emu = _exit_confirming(
         monkeypatch, rpcs3_dirs["sstate_root"] / "BLUS30443" / "BLUS30443_1.SAVESTAT"
     )
@@ -2915,6 +2941,18 @@ def test_session_save_dirs_is_empty_without_a_launch(
     assert "no launch" in caplog.text
 
 
+def test_session_save_dirs_never_claims_a_folder_under_game(rpcs3_dirs: dict[str, Path]) -> None:
+    """An install the session wrote to is not restamped into the dump, even when named for the title."""
+    _hdd_install(rpcs3_dirs["game_dir"])
+    save = _touch(rpcs3.USER_HOME / "savedata" / "BLUS30359-SAVE" / "SAVE.DAT").parent
+
+    emu = rpcs3.Rpcs3()
+    emu._session_start = time.time() - 60
+    emu._session_serial = "BLUS30359"
+
+    assert emu._session_save_dirs() == [save]
+
+
 # -- link_roots --
 
 
@@ -2985,11 +3023,37 @@ def test_a_v1_state_restores_when_the_link_is_made_after_the_plan(rpcs3_dirs: di
     assert (rpcs3_dirs["sstate_root"] / "BLUS30443" / "BLUS30443.SAVESTAT").exists()
 
 
-def test_restore_subtrees_is_the_whole_restore_set_before_the_clear() -> None:
-    """Preflight runs before the clear flips `_restoring`, so it must not depend on it."""
-    emu = rpcs3.Rpcs3()
+def test_an_archive_carrying_game_data_restores_its_saves_and_passes_game_over(
+    rpcs3_dirs: dict[str, Path],
+) -> None:
+    """An archive holding game/ members restores its saves and writes nothing under game/.
 
-    assert emu.restore_subtrees == ("home/00000001/savedata", "game", "savestates")
+    Whatever lands in game/ is never cleared or dumped, so it would reach
+    every later session; an install's own file is newer than the member here
+    and still must not be touched.
+
+    Args:
+        rpcs3_dirs: The patched RPCS3 layout.
+    """
+    install = _hdd_install(rpcs3_dirs["game_dir"])
+    emu = rpcs3.Rpcs3()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name in (
+            "home/00000001/savedata/BLUS30443-AUTO/SAVE.BIN",
+            "game/BLES00001/USRDIR/DATA.BIN",
+            "game/BLUS30359/USRDIR/install.dat",
+        ):
+            zf.writestr(zipfile.ZipInfo(name, date_time=(2099, 1, 1, 0, 0, 0)), b"data")
+    body = buf.getvalue()
+
+    result = saves.extract_save_archive(body, emu.save_root, emu.restore_subtrees, emu.retired_subtrees)
+
+    assert result["error"] is None
+    assert (result["written"], result["excluded"], result["failed"]) == (1, 2, 0)
+    assert (rpcs3.USER_HOME / "savedata" / "BLUS30443-AUTO" / "SAVE.BIN").read_bytes() == b"data"
+    assert not (rpcs3_dirs["game_dir"] / "BLES00001").exists()
+    assert (install / "USRDIR" / "install.dat").read_bytes() == b"\0" * 16
 
 
 # -- declared imports --
@@ -3097,7 +3161,7 @@ def test_the_import_spec_takes_saves_and_one_archived_state() -> None:
     assert spec.state_channel == "archive"
     assert state is not None
     assert (state.requires_resume_slot, state.max_members, state.counts_v1) == (True, 1, True)
-    assert spec.protected == ("home/*/exdata/*", "home/*/trophy/*", "game/*/USRDIR/EBOOT.*")
+    assert spec.protected == ("home/*/exdata/*", "home/*/trophy/*")
     assert (spec.unit_depth, spec.card_subtree) == (0, None)
 
 
@@ -3148,9 +3212,17 @@ def test_a_save_folder_keeps_its_own_subfolders(booted: dict[str, Path]) -> None
     ]
 
 
-@pytest.mark.parametrize("member", [f"game/{_SERIAL}/PARAM.SFO", f"dev_hdd0/game/{_SERIAL}/PARAM.SFO"])
-def test_a_game_data_folder_lands_under_game(booted: dict[str, Path], member: str) -> None:
-    """A cellGameData folder lands under `game/`, even for the title being booted from a disc image.
+@pytest.mark.parametrize(
+    "member",
+    [
+        f"game/{_SERIAL}/PARAM.SFO",
+        f"dev_hdd0/game/{_SERIAL}/PARAM.SFO",
+        "game/BLES00001/USRDIR/EBOOT.BIN",
+        "game/PARAM.SFO",
+    ],
+)
+def test_a_folder_under_game_is_refused(booted: dict[str, Path], member: str) -> None:
+    """game/ holds installed titles and disc installs, so nothing is imported into it.
 
     Args:
         booted: The patched RPCS3 layout.
@@ -3158,8 +3230,8 @@ def test_a_game_data_folder_lands_under_game(booted: dict[str, Path], member: st
     """
     result = _preflight(booted, {f".import/save/{member}": b"sfo"})
 
-    assert result.refusals == ()
-    assert [p.dest for p in result.placements] == [PurePosixPath(f"game/{_SERIAL}/PARAM.SFO")]
+    assert _refused(result) == [("protected_destination", f".import/save/{member}")]
+    assert "not saves" in (result.refusals[0].detail or "")
 
 
 def test_two_users_saves_for_one_folder_collide(booted: dict[str, Path]) -> None:
@@ -3177,7 +3249,7 @@ def test_two_users_saves_for_one_folder_collide(booted: dict[str, Path]) -> None
 
 
 def test_a_bare_folder_is_refused_as_ambiguous(booted: dict[str, Path]) -> None:
-    """RPCS3 keeps save data and game data apart, and a bare folder does not say which it is.
+    """A bare folder does not say where it came from, so it is not guessed into save data.
 
     Args:
         booted: The patched RPCS3 layout.
@@ -3192,7 +3264,6 @@ def test_a_bare_folder_is_refused_as_ambiguous(booted: dict[str, Path]) -> None:
     "member",
     [
         "home/00000001/savedata/PARAM.SFO",
-        "game/PARAM.SFO",
         "home/00000001/localusername",
         "home/00000001/settings/setting.dat",
         "home/notauser/savedata/X/PARAM.SFO",
@@ -3248,12 +3319,10 @@ def test_a_savestate_declared_as_a_save_is_pointed_at_the_state_kind(booted: dic
         "home/00000001/exdata/UP0001-BLUS30443_00-0000000000000000.rap",
         "dev_hdd0/home/00000001/exdata/game.edat",
         "home/00000001/trophy/NPWR00001_00/TROPHY.TRP",
-        "game/$locks/BLUS30443",
-        "game/\uff04locks/BLUS30443",
     ],
 )
-def test_licences_trophies_and_lock_folders_are_protected(booted: dict[str, Path], member: str) -> None:
-    """RPCS3's licences, trophies and lock folders are its own, whatever the archive says.
+def test_licences_and_trophies_are_protected(booted: dict[str, Path], member: str) -> None:
+    """RPCS3's licences and trophies are its own, whatever the archive says.
 
     Args:
         booted: The patched RPCS3 layout.
@@ -3262,53 +3331,6 @@ def test_licences_trophies_and_lock_folders_are_protected(booted: dict[str, Path
     result = _preflight(booted, {f".import/save/{member}": b"data"})
 
     assert _refused(result) == [("protected_destination", f".import/save/{member}")]
-
-
-@pytest.mark.parametrize("leaf", ["EBOOT.BIN", "EBOOT.elf", "EBOOT.BIN.bak"])
-def test_a_games_eboot_is_protected_in_a_game_data_folder(booted: dict[str, Path], leaf: str) -> None:
-    """An `EBOOT.*` under `USRDIR` would replace a game's own executable, so it is refused.
-
-    Args:
-        booted: The patched RPCS3 layout.
-        leaf: The executable's name.
-    """
-    eboot = f".import/save/game/BLES00001/USRDIR/{leaf}"
-
-    result = _preflight(
-        booted,
-        {
-            ".import/save/game/BLES00001/PARAM.SFO": b"sfo",
-            ".import/save/game/BLES00001/USRDIR/DATA.BIN": b"data",
-            eboot: b"code",
-        },
-    )
-
-    assert _refused(result) == [("protected_destination", eboot)]
-
-
-@pytest.mark.parametrize("target", ["installed", "pkg"])
-def test_the_installed_title_being_booted_keeps_its_game_folder(
-    rpcs3_dirs: dict[str, Path], target: str
-) -> None:
-    """An installed title's own `game/` folder holds its executable, so the import stays out of it.
-
-    Every other folder under `game/` is still taken.
-
-    Args:
-        rpcs3_dirs: The patched RPCS3 layout.
-        target: How the title is booted: from its installed `EBOOT.BIN`, or from its `.pkg`.
-    """
-    if target == "installed":
-        rom = rpcs3_dirs["game_dir"] / _SERIAL / "USRDIR" / "EBOOT.BIN"
-    else:
-        rom = _write_pkg(rpcs3_dirs["rom_root"] / "Game.pkg", _SERIAL)
-    own = f".import/save/game/{_SERIAL}/PARAM.SFO"
-    other = ".import/save/game/BLES00001/PARAM.SFO"
-
-    result = _preflight(rpcs3_dirs, {own: b"sfo", other: b"sfo"}, rom_file=rom)
-
-    assert _refused(result) == [("protected_destination", own)]
-    assert [p.dest.as_posix() for p in result.placements] == []
 
 
 def test_a_save_folder_without_param_sfo_is_incomplete(booted: dict[str, Path]) -> None:
@@ -3327,21 +3349,14 @@ def test_a_save_folder_without_param_sfo_is_incomplete(booted: dict[str, Path]) 
 
 
 def test_each_folder_is_a_unit_of_its_own(booted: dict[str, Path]) -> None:
-    """A folder with its `PARAM.SFO` is taken even beside one without, in either tree.
+    """A folder with its `PARAM.SFO` is taken even beside one without.
 
     Args:
         booted: The patched RPCS3 layout.
     """
-    lone = ".import/save/game/BLES00002/USRDIR/DATA.BIN"
+    lone = f".import/save/home/00000001/savedata/{_SERIAL}-SLOT2/USRDIR/DATA.BIN"
 
-    result = _preflight(
-        booted,
-        {
-            _SAVE_MEMBER: b"sfo",
-            ".import/save/game/BLES00001/PARAM.SFO": b"sfo",
-            lone: b"data",
-        },
-    )
+    result = _preflight(booted, {_SAVE_MEMBER: b"sfo", lone: b"data"})
 
     assert _refused(result) == [("incomplete_unit", lone)]
 
@@ -3599,7 +3614,7 @@ def test_an_archived_state_leaves_no_room_for_an_imported_one(booted: dict[str, 
 
 
 def test_an_imported_state_and_saves_restore_where_a_launch_finds_them(rpcs3_dirs: dict[str, Path]) -> None:
-    """Restored, the state is the newest one `launch` picks, and a game data folder is one the dump ships.
+    """Restored, the state is the newest one `launch` picks, and the save lands under savedata.
 
     Args:
         rpcs3_dirs: The patched RPCS3 layout.
@@ -3609,7 +3624,6 @@ def test_an_imported_state_and_saves_restore_where_a_launch_finds_them(rpcs3_dir
     body = import_zip(
         {
             _SAVE_MEMBER: b"sfo",
-            ".import/save/game/BLES00001/PARAM.SFO": b"sfo",
             f".import/state/{_SERIAL}_1.SAVESTAT": b"progress",
         }
     )
@@ -3619,15 +3633,14 @@ def test_an_imported_state_and_saves_restore_where_a_launch_finds_them(rpcs3_dir
     report = restore_import(emu, body, result)
 
     state = rpcs3_dirs["sstate_root"] / _SERIAL / f"{_SERIAL}_import.SAVESTAT"
-    assert (report["imported"], report["failed"]) == (3, 0)
+    assert (report["imported"], report["failed"]) == (2, 0)
     assert state.read_bytes() == b"progress"
     assert rpcs3._newest_state(_SERIAL) == state
     assert (rpcs3_dirs["user_home"] / "savedata" / _SAVEDIR / "PARAM.SFO").read_bytes() == b"sfo"
-    assert [d.name for d in rpcs3._gamedata_dirs()] == ["BLES00001"]
 
 
 def test_lock_folders_are_told_apart_by_prefix(rpcs3_dirs: dict[str, Path]) -> None:
-    """RPCS3's lock folders start with a dollar sign, ASCII or full-width, and are never save data.
+    """RPCS3's lock folders start with a dollar sign, ASCII or full-width, and are never titles.
 
     Args:
         rpcs3_dirs: The patched RPCS3 layout.
@@ -3636,5 +3649,4 @@ def test_lock_folders_are_told_apart_by_prefix(rpcs3_dirs: dict[str, Path]) -> N
         (rpcs3_dirs["game_dir"] / name).mkdir()
 
     assert rpcs3._LOCK_DIR_PREFIXES == ("$", "\uff04")
-    assert [d.name for d in rpcs3._gamedata_dirs()] == ["BLES00001"]
     assert rpcs3._installed_title_dirs() == {"BLES00001"}

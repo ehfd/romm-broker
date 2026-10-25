@@ -769,6 +769,23 @@ def test_restore_subtrees_covers_every_save_subtree(name: str) -> None:
 
 
 @pytest.mark.parametrize("name", sorted(emulators.REGISTRY))
+def test_a_retired_subtree_shares_nothing_with_the_save_set(name: str) -> None:
+    """A restore drops whatever sits under a retired subtree, so one must not reach a live save.
+
+    Args:
+        name: The registry name.
+    """
+    emu = emulators.get_emulator(name)
+    assert emu is not None
+    live = (*emu.save_subtrees, *emu.restore_subtrees)
+
+    for retired in emu.retired_subtrees:
+        assert not any(
+            base._under_subtree(s, retired) or base._under_subtree(retired, s) for s in live
+        ), f"{name} retires {retired}"
+
+
+@pytest.mark.parametrize("name", sorted(emulators.REGISTRY))
 def test_only_rpcs3_declares_a_link_root(name: str) -> None:
     """A link root widens what a restore may write through, so each one is deliberate.
 
@@ -1006,7 +1023,7 @@ _EXAMPLES: list[tuple[str, str, bytes]] = [
     ("ppsspp", ".import/save/ULUS10041DATA00/PARAM.SFO", b"sfo"),
     ("ppsspp", ".import/state/ULUS10041_1.00_1.ppst", b"progress"),
     ("rpcs3", ".import/save/home/00000001/savedata/BLUS30443-AUTOSAVE/PARAM.SFO", b"sfo"),
-    ("rpcs3", ".import/save/game/BLES00001/PARAM.SFO", b"sfo"),
+    ("rpcs3", ".import/save/PS3/SAVEDATA/BLES00001-SAVE/PARAM.SFO", b"sfo"),
     ("rpcs3", ".import/state/BLUS30443_1.SAVESTAT", b"progress"),
     ("scummvm", ".import/save/monkey.003", b"save"),
     ("scummvm", ".import/state/monkey.s02", b"progress"),
