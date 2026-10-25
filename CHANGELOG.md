@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.15.2](https://github.com/romm-streaming/romm-broker/compare/v0.15.1...v0.15.2) (2026-10-25)
+
+
+### Bug Fixes
+
+* **rpcs3:** skip game/ in older archives on restore (pr-ready: code-review) ([072a196](https://github.com/romm-streaming/romm-broker/commit/072a1969f131554d1622ceceada7dad2465a8215))
+* **rpcs3:** stop treating game/ installs as save data ([9586139](https://github.com/romm-streaming/romm-broker/commit/9586139aaa17356574d6e20ddb4ff31c21b49dea))
+* **rpcs3:** stop treating game/ installs as save data ([8efb6db](https://github.com/romm-streaming/romm-broker/commit/8efb6dbf2bafbc5b5445a914a9fe19cfdb854728))
+* use screenshot api not the pixelflux CU ([a188ec9](https://github.com/romm-streaming/romm-broker/commit/a188ec9d8d7f140a45bb73ad33dd33bef6ab1ca3))
+
+
+### Documentation
+
+* **rpcs3:** correct the reboot-wait test's rationale (fix-review: 2) ([b2d12fe](https://github.com/romm-streaming/romm-broker/commit/b2d12fe3b4573ce31783834157472f0d2ca61458))
+
 ## [0.15.1](https://github.com/romm-streaming/romm-broker/compare/v0.15.0...v0.15.1) (2026-10-17)
 
 
