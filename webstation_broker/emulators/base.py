@@ -196,12 +196,16 @@ def base_launch_env() -> dict[str, str]:
     stripped out (see `_SENSITIVE_ENV_VARS`).
 
     Returns:
-        A copy of the broker's environment with the display variables set and
-        the emulator binary directories appended to `PATH`.
+        A copy of the broker's environment with the display variables and Qt
+        audio backend set, and the emulator binary directories appended to
+        `PATH`.
     """
     env = scrubbed_env()
     env["WAYLAND_DISPLAY"] = WAYLAND_DISPLAY
     env["DISPLAY"] = X_DISPLAY
+    # The container runs PulseAudio and no PipeWire daemon; Qt 6.12's audio
+    # code segfaults on its PipeWire path when left to pick a backend.
+    env["QT_AUDIO_BACKEND"] = "pulseaudio"
     # s6 services get a minimal PATH; emulator binaries live in /usr/games.
     path = env.get("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
     for extra in ("/usr/local/bin", "/usr/bin", "/usr/games", "/usr/local/games"):

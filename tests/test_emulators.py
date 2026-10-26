@@ -667,6 +667,13 @@ def test_the_launch_env_points_at_the_labwc_session(monkeypatch: pytest.MonkeyPa
     assert env["DISPLAY"] == ":0"
 
 
+def test_the_launch_env_points_qt_audio_at_pulseaudio(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The launch env sends Qt audio to the container's PulseAudio, whatever the broker inherited."""
+    monkeypatch.setenv("QT_AUDIO_BACKEND", "pipewire")
+
+    assert base.base_launch_env()["QT_AUDIO_BACKEND"] == "pulseaudio"
+
+
 _IMPORTING: frozenset[str] = frozenset(
     {
         "azahar",
