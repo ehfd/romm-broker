@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.15.3](https://github.com/romm-streaming/romm-broker/compare/v0.15.2...v0.15.3) (2026-10-26)
+
+
+### Bug Fixes
+
+* **emulators:** point Qt audio at pulseaudio in the launch env ([3524f52](https://github.com/romm-streaming/romm-broker/commit/3524f526b94f4186c706fbf142aedef52140733d))
+* **emulators:** point Qt audio at pulseaudio in the launch env ([6a48d75](https://github.com/romm-streaming/romm-broker/commit/6a48d75ad33d064a4e3ce13573c53104291c1c4d))
+
 ## [0.15.2](https://github.com/romm-streaming/romm-broker/compare/v0.15.1...v0.15.2) (2026-10-25)
 
 
